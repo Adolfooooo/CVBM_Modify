@@ -1,0 +1,15 @@
+# files
+**/*.log
+*.pyc
+*.pth
+__init__.py
+
+
+
+# folder
+**/results/
+**/logs/
+**/__pychcache__/
+**/.git/
+
+
