@@ -1,13 +1,15 @@
 import os
 import torch
+from torch.utils.data import Dataset
+from torch.utils.data.sampler import Sampler
+from torchvision import transforms
+
 import numpy as np
 from glob import glob
-from torch.utils.data import Dataset
 import h5py
 import itertools
 from scipy import ndimage
 import random
-from torch.utils.data.sampler import Sampler
 from skimage import transform as sk_trans
 from scipy.ndimage import rotate, zoom
 import pdb
@@ -293,17 +295,43 @@ class RandomNoise(object):
         return {'image': image, 'label': label}
 
 
+# class CreateOnehotLabel(object):
+#     def __init__(self, num_classes):
+#         self.num_classes = num_classes
+
+#     def __call__(self, sample):
+#         image, label = sample['image'], sample['label']
+#         # print(label.shape)
+#         onehot_label = np.zeros((self.num_classes, label.shape[0], label.shape[1]), dtype=np.float32)
+#         for i in range(self.num_classes):
+#             onehot_label[i, :, :] = (label == i).type(torch.float32)
+#         return {'image': image, 'label': label, 'onehot_label': onehot_label}
 class CreateOnehotLabel(object):
     def __init__(self, num_classes):
         self.num_classes = num_classes
-
+    
     def __call__(self, sample):
-        image, label = sample['image'], sample['label']
-        # print(label.shape)
-        onehot_label = np.zeros((self.num_classes, label.shape[0], label.shape[1]), dtype=np.float32)
-        for i in range(self.num_classes):
-            onehot_label[i, :, :] = (label == i).type(torch.float32)
-        return {'image': image, 'label': label, 'onehot_label': onehot_label}
+        result = {}
+        
+        # 处理所有 image 相关字段（保持不变）
+        for key in sample:
+            if key.startswith('image'):
+                result[key] = sample[key]
+        
+        # 处理所有 label 相关字段，生成对应的 onehot
+        for key in sample:
+            if key.startswith('label'):
+                label = sample[key]
+                onehot_key = f'onehot_{key}'  # label -> onehot_label, label_strong -> onehot_label_strong
+                
+                onehot_label = np.zeros((self.num_classes, label.shape[0], label.shape[1]), dtype=np.float32)
+                for i in range(self.num_classes):
+                    onehot_label[i, :, :] = (label == i).type(torch.float32)
+                
+                result[key] = label
+                result[onehot_key] = onehot_label
+        
+        return result
 
 class CreateOnehotLabel3D(object):
     def __init__(self, num_classes):
@@ -389,6 +417,87 @@ class ThreeStreamBatchSampler(Sampler):
 
     def __len__(self):
         return len(self.primary_indices) // self.primary_batch_size
+
+
+class WeakStrongAugment(object):
+    """returns weakly and strongly augmented images
+    Args:
+        object (tuple): output size of network
+    """
+    def __init__(self, output_size):
+        self.output_size = output_size
+
+    def __call__(self, sample):
+        image, label = sample["image"], sample["label"]
+        if random.random() > 0.5:  
+            image, label = random_rot_flip(image, label)
+        elif random.random() > 0.5:
+            image, label = random_rotate(image, label)
+        # weak augmentation is rotation / flip
+        x, y = image.shape
+        image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y),order=0)  
+        label = zoom(label, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+
+        # strong augmentation is color jitter
+        image_strong, label_strong = cutout_gray(image,label, p=0.5)
+        image_strong = color_jitter(image_strong).type("torch.FloatTensor")
+        # image_strong = blur(image, p=0.5)
+        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
+        # image_strong = torch.from_numpy(image_strong.astype(np.float32)).unsqueeze(0)
+
+        label = torch.from_numpy(label.astype(np.uint8))
+        label_strong = torch.from_numpy(label_strong.astype(np.uint8))
+        sample = {
+            "image": image,
+            "image_strong": image_strong,
+            "label": label,
+            "label_strong": label_strong
+        }
+        return sample
+
+    def resize(self, image):
+        x, y = image.shape
+        return zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+
+
+def cutout_gray(img, mask, p=0.5, size_min=0.02, size_max=0.4, ratio_1=0.3, ratio_2=1/0.3, value_min=0, value_max=1, pixel_level=True):
+    if random.random() < p:
+        img = np.array(img)
+        mask = np.array(mask)
+
+        img_h, img_w = img.shape
+
+        while True:
+            size = np.random.uniform(size_min, size_max) * img_h * img_w
+            ratio = np.random.uniform(ratio_1, ratio_2)
+            erase_w = int(np.sqrt(size / ratio))
+            erase_h = int(np.sqrt(size * ratio))
+            x = np.random.randint(0, img_w)
+            y = np.random.randint(0, img_h)
+
+            if x + erase_w <= img_w and y + erase_h <= img_h:
+                break
+
+        if pixel_level:
+            value = np.random.randint(value_min, value_max + 1, (erase_h, erase_w))
+        else:
+            value = np.random.randint(value_min, value_max + 1)
+
+        img[y:y + erase_h, x:x + erase_w] = value
+        mask[y:y + erase_h, x:x + erase_w] = 0
+
+    return img, mask
+
+
+def color_jitter(image):
+    if not torch.is_tensor(image):
+        np_to_tensor = transforms.ToTensor()
+        image = np_to_tensor(image)
+    # s is the strength of color distortion.
+    s = 1.0
+    jitter = transforms.ColorJitter(0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s)
+    return jitter(image)
+
 
 def iterate_once(iterable):
     return np.random.permutation(iterable)

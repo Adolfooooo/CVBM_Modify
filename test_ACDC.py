@@ -15,11 +15,11 @@ from tqdm import tqdm
 from networks.net_factory import net_factory
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/ACDC/', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--num_classes', type=int,  default=4, help='output channel of network')
-parser.add_argument('--labelnum', type=int, default=7, help='labeled data')
+parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--stage_name', type=str, default='self_train', help='self or pre')
 
 
@@ -83,8 +83,8 @@ def Inference(FLAGS):
     with open(FLAGS.root_path + '/test.list', 'r') as f:
         image_list = f.readlines()
     image_list = sorted([item.replace('\n', '').split(".")[0] for item in image_list])
-    snapshot_path = "./results/CVBM_ACDC_2_3/2/ACDC_{}_{}_labeled/{}".format(FLAGS.exp, FLAGS.labelnum, FLAGS.stage_name)
-    test_save_path = "./results/CVBM_ACDC_2_3/2/ACDC_{}_{}_labeled/{}_predictions/".format(FLAGS.exp, FLAGS.labelnum, FLAGS.model)
+    snapshot_path = "./results/CVBM_origin/1/ACDC_{}_{}_labeled/{}".format(FLAGS.exp, FLAGS.labelnum, FLAGS.stage_name)
+    test_save_path = "./results/CVBM_origin/1/ACDC_{}_{}_labeled/{}_predictions/".format(FLAGS.exp, FLAGS.labelnum, FLAGS.model)
     if os.path.exists(test_save_path):
         shutil.rmtree(test_save_path)
     os.makedirs(test_save_path)
