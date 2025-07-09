@@ -44,7 +44,7 @@ parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_si
 parser.add_argument('--labelnum', type=int, default=7, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
-parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--consistency', type=float, default=0.1, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
@@ -532,7 +532,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             pseudo_supervision4 = dice_loss(image_output_soft_2, pseudo_reverse(pseudo_image_output_1, 4).unsqueeze(1))
             pseudo_supervision = pseudo_supervision1 + pseudo_supervision2 + pseudo_supervision3 + pseudo_supervision4
 
-            loss = loss_dice + loss_ce + loss_consist_l + loss_consist_u + loss_consist_abd + pseudo_supervision
+            # loss = loss_dice + loss_ce + loss_consist_l + loss_consist_u + loss_consist_abd + pseudo_supervision
+            loss = loss_dice + loss_ce + pseudo_supervision
 
             optimizer.zero_grad()
             loss.backward()
@@ -607,8 +608,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.seed)
 
     # -- path to save models
-    pre_snapshot_path = "./results/CVBM_ACDC_2_3/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_ACDC_2_3/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM_ACDC_2_3/2/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM_ACDC_2_3/2/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
