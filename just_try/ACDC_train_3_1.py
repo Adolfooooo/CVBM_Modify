@@ -259,7 +259,7 @@ def pre_train(args, snapshot_path):
                             split="train",
                             num=None,
                             transform=transforms.Compose([
-                                RandomGenerator(args.patch_size),
+                                WeakStrongAugment(args.patch_size),
                                 CreateOnehotLabel(args.num_classes)
                             ]))
     db_val = BaseDataSets(base_dir=args.root_path, split="val")
@@ -384,7 +384,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                             split="train",
                             num=None,
                             transform=transforms.Compose([
-                                RandomGenerator(args.patch_size),
+                                WeakStrongAugment(args.patch_size),
                                 CreateOnehotLabel(args.num_classes)
                             ]))
     db_val = BaseDataSets(base_dir=args.root_path, split="val")

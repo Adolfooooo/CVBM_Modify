@@ -11,5 +11,5 @@ __init__.py
 **/logs/
 **/__pychcache__/
 **/.git/
-
+**/.ipynb_checkpoints/
 
