@@ -20,12 +20,12 @@ from torchvision import transforms
 from tqdm import tqdm
 from skimage.measure import label
 
-from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel)
+from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default="/root/ACDC", help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
@@ -38,7 +38,7 @@ parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
 # label and unlabel
 parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
-parser.add_argument('--labelnum', type=int, default=7, help='labeled data')
+parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
@@ -259,7 +259,7 @@ def pre_train(args, snapshot_path):
                             split="train",
                             num=None,
                             transform=transforms.Compose([
-                                RandomGenerator(args.patch_size),
+                                WeakStrongAugment(args.patch_size),
                                 CreateOnehotLabel(args.num_classes)
                             ]))
     db_val = BaseDataSets(base_dir=args.root_path, split="val")
@@ -384,7 +384,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                             split="train",
                             num=None,
                             transform=transforms.Compose([
-                                RandomGenerator(args.patch_size),
+                                WeakStrongAugment(args.patch_size),
                                 CreateOnehotLabel(args.num_classes)
                             ]))
     db_val = BaseDataSets(base_dir=args.root_path, split="val")
@@ -428,7 +428,12 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # torch.Size([24, 1, 256, 256]) torch.Size([24, 256, 256]) torch.Size([24, 4, 256, 256])
             volume_batch, label_batch, onehot_label_batch = sampled_batch['image'], sampled_batch['label'], \
                                                             sampled_batch['onehot_label']
+            volume_batch_strong, label_batch_strong, onehot_label_batch_strong = \
+                sampled_batch['image_strong'], sampled_batch['label_strong'], sampled_batch['onehot_label_strong']
             volume_batch, label_batch, onehot_label_batch = volume_batch.cuda(), label_batch.cuda(), onehot_label_batch.cuda()
+            volume_batch_strong, label_batch_strong, onehot_label_batch_strong = \
+                volume_batch_strong.cuda(), label_batch_strong.cuda(), onehot_label_batch_strong.cuda()
+
 
             img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
             uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
@@ -438,6 +443,15 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
             lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
                                                                             labeled_sub_bs:args.labeled_bs] == 0
+
+            img_a_s, img_b_s = volume_batch_strong[:labeled_sub_bs], volume_batch_strong[labeled_sub_bs:args.labeled_bs]
+            uimg_a_s, uimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch_strong[args.labeled_bs + unlabeled_sub_bs:]
+            ulab_a_s, ulab_b_s = label_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch_strong[
+                                                                                                args.labeled_bs + unlabeled_sub_bs:]
+            lab_a_s, lab_b_s = label_batch_strong[:labeled_sub_bs], label_batch_strong[labeled_sub_bs:args.labeled_bs]
+            lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 0, onehot_label_batch_strong[
+                                                                            labeled_sub_bs:args.labeled_bs] == 0
+            
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a)
                 pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b)
@@ -447,6 +461,15 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
                 plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
                 plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
+
+                pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s)
+                pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s)
+                plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
+                plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
+                plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
+                plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
+                plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
                 l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
@@ -455,6 +478,12 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
             net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
             net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
+            net_input = torch.cat([net_input_unl, net_input_l], dim=0)
+
+            net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
+            net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
+            net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
+
 
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
@@ -475,13 +504,50 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             ### Bidirectional Consistency Loss
             # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
 
-            loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), F.softmax((1 - out_l_bg), dim=1))
+            loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), 1 - F.softmax((out_l_bg), dim=1))
                                 +consistency_criterion(F.softmax(out_l, dim=1), F.softmax((out_l_fg), dim=1))
                                 )
-            loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), F.softmax((1 - out_unl_bg), dim=1))
+            loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), 1 - F.softmax((out_unl_bg), dim=1))
                                 +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
                                 )
             loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
+
+            # strong
+            out_unl_fg_s,out_unl_s, out_unl_bg_s, _, _ = model(net_input_unl_s)
+            out_l_fg_s,out_l_s, out_l_bg_s, _, _ = model(net_input_l_s)
+
+            unl_dice_s, unl_ce_s = mix_loss(out_unl_fg_s, plab_a_fg_s, lab_a_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            l_dice_s, l_ce_s = mix_loss(out_l_fg_s, lab_b_s, plab_b_fg_s, loss_mask, u_weight=args.u_weight)
+
+            unl_dice_bg_s, unl_ce_bg_s = onehot_mix_loss(out_unl_bg_s, plab_a_bg_s, lab_a_bg_s, onehot_mask,
+                                                        u_weight=args.u_weight, unlab=True)
+            l_dice_bg_s, l_ce_bg_s = onehot_mix_loss(out_l_bg_s, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
+
+            loss_ce_s = unl_ce_s + l_ce_s + unl_ce_bg_s+ l_ce_bg_s
+            loss_dice_s = unl_dice_s + l_dice_s + unl_dice_bg_s + l_dice_bg_s
+            ### Bidirectional Consistency Loss
+            # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
+            loss_consist_l_s = (consistency_criterion(F.softmax(out_l_fg_s, dim=1), 1 - F.softmax((out_l_bg_s), dim=1))
+                                +consistency_criterion(F.softmax(out_l_s, dim=1), F.softmax((out_l_fg_s), dim=1))
+                                )
+            loss_consist_u_s = (consistency_criterion(F.softmax(out_unl_fg_s, dim=1), 1 - F.softmax((out_unl_bg_s), dim=1))
+                                +consistency_criterion(F.softmax(out_unl_s, dim=1), F.softmax((out_unl_fg_s), dim=1))
+                                )
+            loss_s =loss_dice_s + loss_ce_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
+
+
+            # supervision
+            out_w = torch.cat([out_unl, out_l], dim=0)
+            out_w_soft = F.softmax(out_w, dim=1)
+            out_w_pseudo = torch.argmax(out_w_soft, dim=1, keepdim=False)
+            out_s = torch.cat([out_unl_s, out_l_s], dim=0)
+            out_s_soft = F.softmax(out_s, dim=1)
+            out_s_pseudo = torch.argmax(out_s_soft, dim=1, keepdim=False)
+
+            pseudo_supervision_1 = dice_loss(out_w_soft, out_s_pseudo.unsqueeze(1))
+            pseudo_supervision_2 = dice_loss(out_s_soft, out_w_pseudo.unsqueeze(1))
+
+            loss = loss + loss_s + pseudo_supervision_1 + pseudo_supervision_2
 
             optimizer.zero_grad()
             loss.backward()
@@ -556,8 +622,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.seed)
 
     # -- path to save models
-    pre_snapshot_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM_3_1/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM_3_1/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)

@@ -83,8 +83,8 @@ def Inference(FLAGS):
     with open(FLAGS.root_path + '/test.list', 'r') as f:
         image_list = f.readlines()
     image_list = sorted([item.replace('\n', '').split(".")[0] for item in image_list])
-    snapshot_path = "./results/CVBM_origin/1/ACDC_{}_{}_labeled/{}".format(FLAGS.exp, FLAGS.labelnum, FLAGS.stage_name)
-    test_save_path = "./results/CVBM_origin/1/ACDC_{}_{}_labeled/{}_predictions/".format(FLAGS.exp, FLAGS.labelnum, FLAGS.model)
+    snapshot_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/{}".format(FLAGS.exp, FLAGS.labelnum, FLAGS.stage_name)
+    test_save_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/{}_predictions/".format(FLAGS.exp, FLAGS.labelnum, FLAGS.model)
     if os.path.exists(test_save_path):
         shutil.rmtree(test_save_path)
     os.makedirs(test_save_path)

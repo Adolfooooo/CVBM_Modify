@@ -2,6 +2,7 @@
 **/*.log
 *.pyc
 *.pth
+*copytest*
 __init__.py
 
 
