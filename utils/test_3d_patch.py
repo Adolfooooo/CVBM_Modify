@@ -20,9 +20,9 @@ def getLargestCC(segmentation):
 
 
 def var_all_case_LA(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4):
-    with open('../data/LA/test.list', 'r') as f:
+    with open('/root/LA/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["../data/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in
+    image_list = ["/root/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in
                   image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
@@ -42,9 +42,9 @@ def var_all_case_LA(model, num_classes, patch_size=(112, 112, 80), stride_xy=18,
 
 
 def var_all_case_LA_bg(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4):
-    with open('../data/LA/test.list', 'r') as f:
+    with open('/root/LA/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["../data/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in
+    image_list = ["/root/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in
                   image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
@@ -64,9 +64,9 @@ def var_all_case_LA_bg(model, num_classes, patch_size=(112, 112, 80), stride_xy=
 
 
 def var_all_case_Pancreas(model, num_classes, patch_size=(96, 96, 96), stride_xy=16, stride_z=16):
-    with open('../data/Pancreas/test.list', 'r') as f:
+    with open('/root/Pancreas/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["../data/Pancreas/Pancreas_h5/" + item.replace('\n', '') + "_norm.h5" for item in image_list]
+    image_list = ["/root/Pancreas/Pancreas_h5/" + item.replace('\n', '') + "_norm.h5" for item in image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
     for image_path in loader:
@@ -84,9 +84,9 @@ def var_all_case_Pancreas(model, num_classes, patch_size=(96, 96, 96), stride_xy
     return avg_dice
 
 def var_all_case_BTCV(model, num_classes, patch_size=(96, 96, 96), stride_xy=16, stride_z=16):
-    with open('../data/BTCV/test.list', 'r') as f:
+    with open('/root/BTCV/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["../data/BTCV/btcv_h5/" + item.replace('\n', '') + ".h5" for item in image_list]
+    image_list = ["/root/BTCV/btcv_h5/" + item.replace('\n', '') + ".h5" for item in image_list]
     loader = tqdm(image_list)
     # total_dice = np.zeros(num_classes - 1)
     # total_dice = []
@@ -225,7 +225,7 @@ def test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=
                 cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] \
                     = cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] + 1
     score_map = score_map / np.expand_dims(cnt, axis=0)
-    label_map = (score_map[0] > 0.5).astype(np.int)
+    label_map = (score_map[0] > 0.5).astype(np.int64)
     if add_pad:
         label_map = label_map[wl_pad:wl_pad + w, hl_pad:hl_pad + h, dl_pad:dl_pad + d]
         score_map = score_map[:, wl_pad:wl_pad + w, hl_pad:hl_pad + h, dl_pad:dl_pad + d]
@@ -423,7 +423,7 @@ def test_single_case_plus(model_l, model_r, image, stride_xy, stride_z, patch_si
                 cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] \
                     = cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] + 1
     score_map = score_map / np.expand_dims(cnt, axis=0)
-    label_map = (score_map[0] < 0.5).astype(np.int)
+    label_map = (score_map[0] < 0.5).astype(np.int64)
     if add_pad:
         label_map = label_map[wl_pad:wl_pad + w, hl_pad:hl_pad + h, dl_pad:dl_pad + d]
         score_map = score_map[:, wl_pad:wl_pad + w, hl_pad:hl_pad + h, dl_pad:dl_pad + d]

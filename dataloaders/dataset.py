@@ -1,4 +1,7 @@
 import os
+import random
+import itertools
+
 import torch
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import Sampler
@@ -7,9 +10,7 @@ from torchvision import transforms
 import numpy as np
 from glob import glob
 import h5py
-import itertools
 from scipy import ndimage
-import random
 from skimage import transform as sk_trans
 from scipy.ndimage import rotate, zoom
 import pdb
@@ -458,6 +459,261 @@ class WeakStrongAugment(object):
     def resize(self, image):
         x, y = image.shape
         return zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+
+
+class WeakStrongAugment_LA(object):
+    """returns weakly and strongly augmented 3D images
+    Args:
+        output_size (tuple): output size of network (w, h, d)
+    """
+    def __init__(self, output_size):
+        self.output_size = output_size
+
+    def __call__(self, sample):
+        image, label = sample["image"], sample["label"]
+
+        # image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
+        # label = torch.from_numpy(label.astype(np.uint8))
+        # if torch.cuda.is_available():
+        #     image = image.cuda()
+        #     label = label.cuda()
+        
+        # Random crop to fixed size (like RandomCrop)
+        image, label = self.random_crop_3d(image, label)
+        
+        # Apply weak augmentation (rotation/flip) with probability
+        # if random.random() > 0.5:  
+        #     image, label = random_rot_flip_3d(image, label)
+        if random.random() > 0.5:
+            image, label = random_rotate_3d(image, label)
+
+        # Strong augmentation (cutout + color jitter)
+        # image_strong, label_strong = cutout_gray_3d(image, label, p=0.5)
+        # image_strong = color_jitter_3d(image_strong)
+        
+        # Convert to tensors
+        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
+        # image_strong = torch.from_numpy(image_strong.astype(np.float32)).unsqueeze(0)
+        label = torch.from_numpy(label.astype(np.uint8))
+        # label_strong = torch.from_numpy(label_strong.astype(np.uint8))
+        
+        sample = {
+            "image": image,
+            # "image_strong": image_strong,
+            "label": label,
+            # "label_strong": label_strong
+        }
+        return sample
+
+    def random_crop_3d(self, image, label):
+        """3D random crop to fixed output size (like RandomCrop)"""
+        w, h, d = image.shape
+        
+        # Pad if necessary (same logic as original RandomCrop)
+        if w <= self.output_size[0] or h <= self.output_size[1] or d <= self.output_size[2]:
+            pw = max((self.output_size[0] - w) // 2 + 3, 0)
+            ph = max((self.output_size[1] - h) // 2 + 3, 0)
+            pd = max((self.output_size[2] - d) // 2 + 3, 0)
+            image = np.pad(image, [(pw, pw), (ph, ph), (pd, pd)], mode='constant', constant_values=0)
+            label = np.pad(label, [(pw, pw), (ph, ph), (pd, pd)], mode='constant', constant_values=0)
+        
+        # Get new dimensions after padding
+        w, h, d = image.shape
+        
+        # Random crop
+        w1 = random.randint(0, w - self.output_size[0])
+        h1 = random.randint(0, h - self.output_size[1])
+        d1 = random.randint(0, d - self.output_size[2])
+        
+        image = image[w1:w1 + self.output_size[0], h1:h1 + self.output_size[1], d1:d1 + self.output_size[2]]
+        label = label[w1:w1 + self.output_size[0], h1:h1 + self.output_size[1], d1:d1 + self.output_size[2]]
+        
+        return image, label
+
+# 需要实现的3D增强函数
+def random_rot_flip_3d(image, label):
+    """3D random rotation and flip"""
+    # 随机选择旋转轴 (0, 1, 2对应x, y, z轴)
+    axis = random.choice([0, 1, 2])
+    k = random.randint(0, 3)  # 旋转次数
+    image = np.rot90(image, k, axes=(axis, (axis+1)%3))
+    label = np.rot90(label, k, axes=(axis, (axis+1)%3))
+    
+    # 随机翻转
+    if random.random() > 0.5:
+        flip_axis = random.choice([0, 1, 2])
+        image = np.flip(image, axis=flip_axis)
+        label = np.flip(label, axis=flip_axis)
+    
+    return image, label
+
+def random_rotate_3d(image, label):
+    """3D random rotation with small angles"""
+    from scipy.ndimage import rotate
+    angle = random.uniform(-15, 15)
+    axes = random.choice([(0, 1), (0, 2), (1, 2)])
+    
+    image = rotate(image, angle, axes=axes, reshape=False, order=0)
+    label = rotate(label, angle, axes=axes, reshape=False, order=0)
+    
+    return image, label
+
+def cutout_gray_3d(image, label, p=0.5):
+    """3D cutout augmentation"""
+    if random.random() > p:
+        return image, label
+    
+    image_out = image.copy()
+    label_out = label.copy()
+    
+    # 随机选择cutout的3D区域
+    h, w, d = image.shape
+    cut_h = random.randint(h//8, h//4)
+    cut_w = random.randint(w//8, w//4) 
+    cut_d = random.randint(d//8, d//4)
+    
+    start_h = random.randint(0, h - cut_h)
+    start_w = random.randint(0, w - cut_w)
+    start_d = random.randint(0, d - cut_d)
+    
+    # 将选定区域设为0
+    image_out[start_h:start_h+cut_h, start_w:start_w+cut_w, start_d:start_d+cut_d] = 0
+    
+    return image_out, label_out
+
+def color_jitter_3d(image):
+    """3D color jitter (brightness, contrast adjustment)"""
+    # 亮度调整
+    brightness_factor = random.uniform(0.8, 1.2)
+    image = image * brightness_factor
+    
+    # 对比度调整
+    contrast_factor = random.uniform(0.8, 1.2)
+    mean = np.mean(image)
+    image = (image - mean) * contrast_factor + mean
+    
+    # 确保值在合理范围内
+    image = np.clip(image, 0, 1)
+    
+    return image
+
+
+class GPUBatchAugmentor:
+    """GPU上的批量数据增强"""
+    
+    def __init__(self, device='cuda'):
+        self.device = device
+    
+    def __call__(self, batch):
+        """对整个batch进行GPU增强"""
+        images = batch["image"].to(self.device)  # [B, 1, W, H, D]
+        labels = batch["label"].to(self.device)  # [B, W, H, D]
+        
+        # 生成弱增强和强增强
+        images_weak, labels_weak = self.weak_augment_batch(images, labels)
+        images_strong, labels_strong = self.strong_augment_batch(images, labels)
+        
+        return {
+            "image": images_weak,
+            "image_strong": images_strong,
+            "label": labels_weak,
+            "label_strong": labels_strong
+        }
+    
+    def weak_augment_batch(self, images, labels):
+        """批量弱增强"""
+        batch_size = images.shape[0]
+        augmented_images = []
+        augmented_labels = []
+        
+        for i in range(batch_size):
+            img = images[i]  # [1, W, H, D]
+            lbl = labels[i]  # [W, H, D]
+            
+            # 随机旋转（90度倍数，快速）
+            # if random.random() > 0.5:
+            #     img, lbl = self.gpu_rotate_90_3d(img, lbl)
+            
+            augmented_images.append(img)
+            augmented_labels.append(lbl)
+        
+        return torch.stack(augmented_images), torch.stack(augmented_labels)
+    
+    def strong_augment_batch(self, images, labels):
+        """批量强增强"""
+        batch_size = images.shape[0]
+        augmented_images = []
+        augmented_labels = []
+        
+        for i in range(batch_size):
+            img = images[i]  # [1, W, H, D]
+            lbl = labels[i]  # [W, H, D]
+            
+            # 弱增强
+            # if random.random() > 0.5:
+            #     img, lbl = self.gpu_rotate_90_3d(img, lbl)
+            
+            # 强增强：cutout
+            img, lbl = self.gpu_cutout_3d(img, lbl)
+            
+            # 颜色变换
+            img = self.gpu_color_jitter_3d(img)
+            
+            augmented_images.append(img)
+            augmented_labels.append(lbl)
+        
+        return torch.stack(augmented_images), torch.stack(augmented_labels)
+    
+    def gpu_rotate_90_3d(self, image, label):
+        """GPU上的快速90度旋转"""
+        # 随机选择旋转轴和次数
+        axis_pairs = [(2, 3), (2, 4), (3, 4)]  # 对应(H,D), (W,D), (W,H)
+        axis_pair = random.choice(axis_pairs)
+        k = random.randint(0, 3)
+        
+        # 使用torch.rot90进行快速旋转
+        image = torch.rot90(image, k, dims=axis_pair)
+        label = torch.rot90(label, k, dims=[d-1 for d in axis_pair])  # label少一个维度
+        
+        return image, label
+    
+    def gpu_cutout_3d(self, image, label, p=0.5):
+        """GPU上的3D cutout"""
+        if random.random() > p:
+            return image, label
+        
+        _, w, h, d = image.shape
+        
+        # 生成cutout区域
+        cut_w = random.randint(w//8, w//4)
+        cut_h = random.randint(h//8, h//4)
+        cut_d = random.randint(d//8, d//4)
+        
+        start_w = random.randint(0, w - cut_w)
+        start_h = random.randint(0, h - cut_h)
+        start_d = random.randint(0, d - cut_d)
+        
+        # 应用cutout
+        image_out = image.clone()
+        image_out[:, start_w:start_w+cut_w, start_h:start_h+cut_h, start_d:start_d+cut_d] = 0
+        
+        return image_out, label
+    
+    def gpu_color_jitter_3d(self, image):
+        """GPU上的颜色变换"""
+        # 亮度调整
+        brightness_factor = random.uniform(0.8, 1.2)
+        image = image * brightness_factor
+        
+        # 对比度调整
+        contrast_factor = random.uniform(0.8, 1.2)
+        mean = torch.mean(image)
+        image = (image - mean) * contrast_factor + mean
+        
+        # 限制值范围
+        image = torch.clamp(image, 0, 1)
+        
+        return image
 
 
 def cutout_gray(img, mask, p=0.5, size_min=0.02, size_max=0.4, ratio_1=0.3, ratio_2=1/0.3, value_min=0, value_max=1, pixel_level=True):

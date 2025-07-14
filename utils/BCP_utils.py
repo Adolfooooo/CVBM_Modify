@@ -1,7 +1,7 @@
 from locale import normalize
 from multiprocessing import reduction
 import pdb
-from turtle import pd
+# from turtle import pd
 import numpy as np
 import torch.nn as nn
 import torch
