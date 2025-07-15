@@ -350,6 +350,7 @@ class ToTensor(object):
 
     def __call__(self, sample):
         image = sample['image']
+
         image = image.reshape(1, image.shape[0], image.shape[1], image.shape[2]).astype(np.float32)
         if 'onehot_label' in sample:
             return {'image': torch.from_numpy(image), 'label': torch.from_numpy(sample['label']).long(),
@@ -598,21 +599,20 @@ def color_jitter_3d(image):
     return image
 
 
+import numpy as np
+from scipy.ndimage import rotate
+from copy import deepcopy
+import warnings
+
 class RandomFlip:
-    """
-    Randomly flips the image across the given axes. Image can be either 3D (DxHxW) or 4D (CxDxHxW).
-
-    When creating make sure that the provided RandomStates are consistent between raw and labeled datasets,
-    otherwise the models won't converge.
-    """
-
+    """随机翻转"""
     def __init__(self, random_state, axis_prob=0.5, **kwargs):
         assert random_state is not None, 'RandomState cannot be None'
         self.random_state = random_state
         self.axes = (0, 1, 2)
         self.axis_prob = axis_prob
 
-    def __call__(self, m):
+    def __call__(self, m): 
         assert m.ndim in [3, 4], 'Supports only 3D (DxHxW) or 4D (CxDxHxW) images'
 
         for axis in self.axes:
@@ -622,16 +622,10 @@ class RandomFlip:
                 else:
                     channels = [np.flip(m[c], axis) for c in range(m.shape[0])]
                     m = np.stack(channels, axis=0)
-
         return m
 
-
 class RandomRotate:
-    """
-    Rotate an array by a random degrees from taken from (-angle_spectrum, angle_spectrum) interval.
-    Rotation axis is picked at random from the list of provided axes.
-    """
-
+    """随机旋转"""
     def __init__(self, random_state, angle_spectrum=30, axes=None, mode='reflect', order=0, **kwargs):
         if axes is None:
             axes = [(1, 0), (2, 1), (2, 0)]
@@ -654,15 +648,10 @@ class RandomRotate:
             channels = [rotate(m[c], angle, axes=axis, reshape=False, order=self.order, mode=self.mode, cval=-1) for c
                         in range(m.shape[0])]
             m = np.stack(channels, axis=0)
-
         return m
 
-
 class RandomContrast:
-    """
-    Adjust contrast by scaling each voxel to `mean + alpha * (v - mean)`.
-    """
-
+    """随机对比度调整"""
     def __init__(self, random_state, alpha=(0.5, 1.5), mean=0.0, execution_probability=0.1, **kwargs):
         self.random_state = random_state
         assert len(alpha) == 2
@@ -675,9 +664,185 @@ class RandomContrast:
             alpha = self.random_state.uniform(self.alpha[0], self.alpha[1])
             result = self.mean + alpha * (m - self.mean)
             return np.clip(result, -1, 1)
-
         return m
         
+
+class DualAugmentTransform:
+    """
+    双增强Transform类 - 直接集成到transforms.Compose中
+    
+    输入: {'image': tensor/numpy, 'label': tensor/numpy}
+    输出: {'image': tensor, 'label': tensor, 'image_strong': tensor, 'label_strong': tensor}
+    """
+    
+    def __init__(self, base_random_state=None, **kwargs):
+        """
+        Args:
+            base_random_state: 基础随机状态
+            **kwargs: 可以传入weak_config, strong_config来自定义配置
+        """
+        if base_random_state is None:
+            base_random_state = np.random.RandomState(42)
+        
+        self.base_random_state = base_random_state
+        
+        # 弱增强配置
+        self.weak_config = {
+            'flip': {'axis_prob': 0.3},
+            'rotate': {'angle_spectrum': 15, 'mode': 'reflect', 'order': 0},
+            'contrast': {'alpha': (0.8, 1.2), 'mean': 0.0, 'execution_probability': 0.1}
+        }
+        
+        # 强增强配置
+        self.strong_config = {
+            'flip': {'axis_prob': 0.5},
+            'rotate': {'angle_spectrum': 45, 'mode': 'reflect', 'order': 0},
+            'contrast': {'alpha': (0.5, 1.8), 'mean': 0.0, 'execution_probability': 0.3}
+        }
+        
+        # 允许自定义配置
+        if 'weak_config' in kwargs:
+            self._update_config(self.weak_config, kwargs['weak_config'])
+        if 'strong_config' in kwargs:
+            self._update_config(self.strong_config, kwargs['strong_config'])
+    
+    def _update_config(self, base_config, update_config):
+        """递归更新配置"""
+        for key, value in update_config.items():
+            if key in base_config and isinstance(base_config[key], dict) and isinstance(value, dict):
+                self._update_config(base_config[key], value)
+            else:
+                base_config[key] = value
+    
+    def __call__(self, sample):
+        """
+        Transform调用函数
+        
+        Args:
+            sample: 可以是以下格式之一:
+                   - {'image': array, 'label': array}  
+                   - (image_array, label_array)
+                   - image_array (只有图像)
+        
+        Returns:
+            dict: {
+                'image': torch.Tensor,      # 弱增强或原始
+                'label': torch.Tensor,      # 弱增强或原始
+                'image_strong': torch.Tensor,  # 强增强
+                'label_strong': torch.Tensor   # 强增强
+            }
+        """
+        
+        # 统一输入格式
+        if isinstance(sample, dict):
+            image = sample['image']
+            label = sample.get('label', None)
+        elif isinstance(sample, (tuple, list)) and len(sample) == 2:
+            image, label = sample
+        else:
+            image = sample
+            label = None
+        
+        # 转换为numpy格式进行增强
+        image_np = np.array(image)
+        label_np = np.array(label)
+        print(label_np.shape)
+        import sys
+        sys.exit()
+        # 生成随机种子
+        weak_seed = self.base_random_state.randint(0, 2**31)
+        strong_seed = self.base_random_state.randint(0, 2**31)
+        
+        # 弱增强（或保持原样）
+        weak_image, weak_label = self._apply_augmentation(
+            image_np, label_np, self.weak_config, weak_seed
+        )
+        
+        # 强增强
+        strong_image, strong_label = self._apply_augmentation(
+            image_np, label_np, self.strong_config, strong_seed
+        )
+        
+        # 转换回tensor格式
+        result = {
+            'image': self._to_tensor(weak_image),
+            'image_strong': self._to_tensor(strong_image)
+        }
+        
+        if label is not None:
+            result['label'] = self._to_tensor(weak_label, is_label=True)
+            result['label_strong'] = self._to_tensor(strong_label, is_label=True)
+        
+        return result
+    
+    def _to_tensor(self, data, is_label=False):
+        """转换为tensor格式"""
+        if data is None:
+            return None
+        
+        tensor = torch.from_numpy(data.copy())
+        
+        # 添加batch维度和channel维度: (H, W, D) -> (1, 1, H, W, D)
+        tensor = tensor.unsqueeze(0).unsqueeze(0)
+        
+        if is_label:
+            return tensor.long()
+        else:
+            return tensor.float()
+        
+    def _create_augmenters(self, config, seed):
+        """根据配置创建增强器"""
+        flip_random = np.random.RandomState(seed)
+        rotate_random = np.random.RandomState(seed + 1)
+        contrast_random = np.random.RandomState(seed + 2)
+        
+        return {
+            'flip': RandomFlip(flip_random, **config['flip']),
+            'rotate': RandomRotate(rotate_random, **config['rotate']),
+            'contrast': RandomContrast(contrast_random, **config['contrast'])
+        }
+    
+    def _apply_augmentation(self, image, label, config, seed):
+        """应用增强"""
+        augmenters = self._create_augmenters(config, seed)
+        
+        # 复制输入数据
+        aug_image = image.copy()
+        aug_label = label.copy() if label is not None else None
+
+        if label is not None:
+            # 对几何变换使用相同的随机状态以保证图像和标签的一致性
+            geom_seed = seed + 10
+            
+            # 翻转 - 图像和标签使用相同随机状态
+            flip_random_img = np.random.RandomState(geom_seed)
+            flip_random_label = np.random.RandomState(geom_seed)
+            flip_img = RandomFlip(flip_random_img, **config['flip'])
+            flip_label = RandomFlip(flip_random_label, **config['flip'])
+            aug_image = flip_img(aug_image)
+            aug_label = flip_label(aug_label)
+            
+            # 旋转 - 标签使用最近邻插值
+            rotate_config_label = config['rotate'].copy()
+            rotate_config_label['order'] = 0  # 标签使用最近邻插值
+            
+            rotate_random_img = np.random.RandomState(geom_seed + 1)
+            rotate_random_label = np.random.RandomState(geom_seed + 1)
+            rotate_img = RandomRotate(rotate_random_img, **config['rotate'])
+            rotate_label = RandomRotate(rotate_random_label, **rotate_config_label)
+            aug_image = rotate_img(aug_image)
+            aug_label = rotate_label(aug_label)
+            
+        else:
+            # 只有图像时正常应用变换
+            aug_image = augmenters['flip'](aug_image)
+            aug_image = augmenters['rotate'](aug_image)
+        
+        # 对比度调整只应用于图像
+        aug_image = augmenters['contrast'](aug_image)
+        
+        return aug_image, aug_label
+
 
 def cutout_gray(img, mask, p=0.5, size_min=0.02, size_max=0.4, ratio_1=0.3, ratio_2=1/0.3, value_min=0, value_max=1, pixel_level=True):
     if random.random() < p:

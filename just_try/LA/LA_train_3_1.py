@@ -20,7 +20,7 @@ import numpy as np
 
 from utils import losses, ramps, test_3d_patch
 # from dataloaders.dataset import *
-from dataloaders.dataset import LAHeart, RandomRotFlip, RandomCrop, ToTensor, WeakStrongAugment_LA, TwoStreamBatchSampler, GPUBatchAugmentor
+from dataloaders.dataset import LAHeart, RandomRotFlip, RandomCrop, ToTensor, WeakStrongAugment_LA, TwoStreamBatchSampler, DualAugmentTransform
 from networks.net_factory import net_factory
 from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
@@ -236,18 +236,19 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     for param in ema_model.parameters():
         param.detach_()  # ema_model set
-    # db_train = LAHeart(base_dir=train_data_path,
-    #                    split='train',
-    #                    transform=transforms.Compose([
-    #                        RandomRotFlip(),
-    #                        RandomCrop(patch_size),
-    #                        ToTensor(),
-    #                    ]))
     db_train = LAHeart(base_dir=train_data_path,
                        split='train',
                        transform=transforms.Compose([
-                           WeakStrongAugment_LA(output_size=[112, 112, 80])
+                        #    RandomRotFlip(),
+                           RandomCrop(patch_size),
+                           DualAugmentTransform(), 
+                        #    ToTensor(),
                        ]))
+    # db_train = LAHeart(base_dir=train_data_path,
+    #                    split='train',
+    #                    transform=transforms.Compose([
+    #                        WeakStrongAugment_LA(output_size=[112, 112, 80])
+    #                    ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
     unlabeled_idxs = list(range(labelnum, args.max_samples))
@@ -276,23 +277,17 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     lr_ = base_lr
     iterator = tqdm(range(max_epoch), ncols=70)
 
-    gpu_augmentor = GPUBatchAugmentor(device='cuda')
     for epoch in iterator:
         for _, sampled_batch in enumerate(trainloader):
-            augmented_batch = gpu_augmentor(sampled_batch)
-            volume_batch = augmented_batch["image"]          # 弱增强
-            label_batch = augmented_batch["label"]
-            
-            # volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
+
+            volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:args.labeled_bs]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:args.labeled_bs]
             lab_a_bg, lab_b_bg = label_batch[:sub_bs] == 0, label_batch[sub_bs:args.labeled_bs] == 0
             unimg_a, unimg_b = volume_batch[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch[
                                                                                        args.labeled_bs + sub_bs:]
-            
-            volume_batch_strong = augmented_batch["image_strong"]  # 强增强
-            label_batch_strong = augmented_batch["label_strong"]
+
             with torch.no_grad():
                 unoutput_a_fg,unoutput_a, unoutput_a_bg, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a)
                 unoutput_b_fg,unoutput_b, unoutput_b_bg, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b)
@@ -433,8 +428,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "../model/CVBM/1/LA_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "../model/CVBM/1/LA_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM_LA_train_3_1/1/LA_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM_LA_train_3_1/1/LA_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
@@ -447,7 +442,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
