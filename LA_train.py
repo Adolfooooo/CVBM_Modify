@@ -18,7 +18,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='../data/LA', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
@@ -411,21 +411,21 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "../model/CVBM/LA_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "../model/CVBM/LA_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM/LA_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM/LA_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
-    shutil.copy('../code/LA_train.py', self_snapshot_path)
+    shutil.copy('./LA_train.py', self_snapshot_path)
     # # -- Pre-Training
-    # logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
-    #                     format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
-    # logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
-    # logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
+                        format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    logging.info(str(args))
+    pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')

@@ -590,8 +590,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.seed)
 
     # -- path to save models
-    pre_snapshot_path = "./results/CVBM_ACDC_2_1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_ACDC_2_1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM_ACDC_2_1/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM_ACDC_2_1/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)

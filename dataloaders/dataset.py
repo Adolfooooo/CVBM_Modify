@@ -598,123 +598,86 @@ def color_jitter_3d(image):
     return image
 
 
-class GPUBatchAugmentor:
-    """GPU上的批量数据增强"""
-    
-    def __init__(self, device='cuda'):
-        self.device = device
-    
-    def __call__(self, batch):
-        """对整个batch进行GPU增强"""
-        images = batch["image"].to(self.device)  # [B, 1, W, H, D]
-        labels = batch["label"].to(self.device)  # [B, W, H, D]
-        
-        # 生成弱增强和强增强
-        images_weak, labels_weak = self.weak_augment_batch(images, labels)
-        images_strong, labels_strong = self.strong_augment_batch(images, labels)
-        
-        return {
-            "image": images_weak,
-            "image_strong": images_strong,
-            "label": labels_weak,
-            "label_strong": labels_strong
-        }
-    
-    def weak_augment_batch(self, images, labels):
-        """批量弱增强"""
-        batch_size = images.shape[0]
-        augmented_images = []
-        augmented_labels = []
-        
-        for i in range(batch_size):
-            img = images[i]  # [1, W, H, D]
-            lbl = labels[i]  # [W, H, D]
-            
-            # 随机旋转（90度倍数，快速）
-            # if random.random() > 0.5:
-            #     img, lbl = self.gpu_rotate_90_3d(img, lbl)
-            
-            augmented_images.append(img)
-            augmented_labels.append(lbl)
-        
-        return torch.stack(augmented_images), torch.stack(augmented_labels)
-    
-    def strong_augment_batch(self, images, labels):
-        """批量强增强"""
-        batch_size = images.shape[0]
-        augmented_images = []
-        augmented_labels = []
-        
-        for i in range(batch_size):
-            img = images[i]  # [1, W, H, D]
-            lbl = labels[i]  # [W, H, D]
-            
-            # 弱增强
-            # if random.random() > 0.5:
-            #     img, lbl = self.gpu_rotate_90_3d(img, lbl)
-            
-            # 强增强：cutout
-            img, lbl = self.gpu_cutout_3d(img, lbl)
-            
-            # 颜色变换
-            img = self.gpu_color_jitter_3d(img)
-            
-            augmented_images.append(img)
-            augmented_labels.append(lbl)
-        
-        return torch.stack(augmented_images), torch.stack(augmented_labels)
-    
-    def gpu_rotate_90_3d(self, image, label):
-        """GPU上的快速90度旋转"""
-        # 随机选择旋转轴和次数
-        axis_pairs = [(2, 3), (2, 4), (3, 4)]  # 对应(H,D), (W,D), (W,H)
-        axis_pair = random.choice(axis_pairs)
-        k = random.randint(0, 3)
-        
-        # 使用torch.rot90进行快速旋转
-        image = torch.rot90(image, k, dims=axis_pair)
-        label = torch.rot90(label, k, dims=[d-1 for d in axis_pair])  # label少一个维度
-        
-        return image, label
-    
-    def gpu_cutout_3d(self, image, label, p=0.5):
-        """GPU上的3D cutout"""
-        if random.random() > p:
-            return image, label
-        
-        _, w, h, d = image.shape
-        
-        # 生成cutout区域
-        cut_w = random.randint(w//8, w//4)
-        cut_h = random.randint(h//8, h//4)
-        cut_d = random.randint(d//8, d//4)
-        
-        start_w = random.randint(0, w - cut_w)
-        start_h = random.randint(0, h - cut_h)
-        start_d = random.randint(0, d - cut_d)
-        
-        # 应用cutout
-        image_out = image.clone()
-        image_out[:, start_w:start_w+cut_w, start_h:start_h+cut_h, start_d:start_d+cut_d] = 0
-        
-        return image_out, label
-    
-    def gpu_color_jitter_3d(self, image):
-        """GPU上的颜色变换"""
-        # 亮度调整
-        brightness_factor = random.uniform(0.8, 1.2)
-        image = image * brightness_factor
-        
-        # 对比度调整
-        contrast_factor = random.uniform(0.8, 1.2)
-        mean = torch.mean(image)
-        image = (image - mean) * contrast_factor + mean
-        
-        # 限制值范围
-        image = torch.clamp(image, 0, 1)
-        
-        return image
+class RandomFlip:
+    """
+    Randomly flips the image across the given axes. Image can be either 3D (DxHxW) or 4D (CxDxHxW).
 
+    When creating make sure that the provided RandomStates are consistent between raw and labeled datasets,
+    otherwise the models won't converge.
+    """
+
+    def __init__(self, random_state, axis_prob=0.5, **kwargs):
+        assert random_state is not None, 'RandomState cannot be None'
+        self.random_state = random_state
+        self.axes = (0, 1, 2)
+        self.axis_prob = axis_prob
+
+    def __call__(self, m):
+        assert m.ndim in [3, 4], 'Supports only 3D (DxHxW) or 4D (CxDxHxW) images'
+
+        for axis in self.axes:
+            if self.random_state.uniform() > self.axis_prob:
+                if m.ndim == 3:
+                    m = np.flip(m, axis)
+                else:
+                    channels = [np.flip(m[c], axis) for c in range(m.shape[0])]
+                    m = np.stack(channels, axis=0)
+
+        return m
+
+
+class RandomRotate:
+    """
+    Rotate an array by a random degrees from taken from (-angle_spectrum, angle_spectrum) interval.
+    Rotation axis is picked at random from the list of provided axes.
+    """
+
+    def __init__(self, random_state, angle_spectrum=30, axes=None, mode='reflect', order=0, **kwargs):
+        if axes is None:
+            axes = [(1, 0), (2, 1), (2, 0)]
+        else:
+            assert isinstance(axes, list) and len(axes) > 0
+
+        self.random_state = random_state
+        self.angle_spectrum = angle_spectrum
+        self.axes = axes
+        self.mode = mode
+        self.order = order
+
+    def __call__(self, m):
+        axis = self.axes[self.random_state.randint(len(self.axes))]
+        angle = self.random_state.randint(-self.angle_spectrum, self.angle_spectrum)
+
+        if m.ndim == 3:
+            m = rotate(m, angle, axes=axis, reshape=False, order=self.order, mode=self.mode, cval=-1)
+        else:
+            channels = [rotate(m[c], angle, axes=axis, reshape=False, order=self.order, mode=self.mode, cval=-1) for c
+                        in range(m.shape[0])]
+            m = np.stack(channels, axis=0)
+
+        return m
+
+
+class RandomContrast:
+    """
+    Adjust contrast by scaling each voxel to `mean + alpha * (v - mean)`.
+    """
+
+    def __init__(self, random_state, alpha=(0.5, 1.5), mean=0.0, execution_probability=0.1, **kwargs):
+        self.random_state = random_state
+        assert len(alpha) == 2
+        self.alpha = alpha
+        self.mean = mean
+        self.execution_probability = execution_probability
+
+    def __call__(self, m):
+        if self.random_state.uniform() < self.execution_probability:
+            alpha = self.random_state.uniform(self.alpha[0], self.alpha[1])
+            result = self.mean + alpha * (m - self.mean)
+            return np.clip(result, -1, 1)
+
+        return m
+        
 
 def cutout_gray(img, mask, p=0.5, size_min=0.02, size_max=0.4, ratio_1=0.3, ratio_2=1/0.3, value_min=0, value_max=1, pixel_level=True):
     if random.random() < p:

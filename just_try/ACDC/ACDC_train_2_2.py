@@ -28,13 +28,13 @@ from utils import losses, ramps, feature_memory, contrastive_losses, val_2d
 from networks.ABD import ABD_R_BCP
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
-parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
+parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
@@ -600,8 +600,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.seed)
 
     # -- path to save models
-    pre_snapshot_path = "./results/CVBM_ACDC_2_2/4/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_ACDC_2_2/4/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM_ACDC_2_2/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM_ACDC_2_2/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
