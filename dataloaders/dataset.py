@@ -744,11 +744,10 @@ class DualAugmentTransform:
             label = None
         
         # 转换为numpy格式进行增强
+        # image_np, label_np: (112, 112, 80), (112, 112, 80)
         image_np = np.array(image)
         label_np = np.array(label)
-        print(label_np.shape)
-        import sys
-        sys.exit()
+
         # 生成随机种子
         weak_seed = self.base_random_state.randint(0, 2**31)
         strong_seed = self.base_random_state.randint(0, 2**31)
@@ -783,11 +782,12 @@ class DualAugmentTransform:
         tensor = torch.from_numpy(data.copy())
         
         # 添加batch维度和channel维度: (H, W, D) -> (1, 1, H, W, D)
-        tensor = tensor.unsqueeze(0).unsqueeze(0)
+        
         
         if is_label:
             return tensor.long()
         else:
+            
             return tensor.float()
         
     def _create_augmenters(self, config, seed):

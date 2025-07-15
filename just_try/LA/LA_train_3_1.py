@@ -26,7 +26,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/LA/LA_UA-MT_Version', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
@@ -37,7 +37,7 @@ parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gp
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=4, help='trained samples')
-parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
@@ -259,7 +259,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=8, pin_memory=True,
+    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=1, pin_memory=True,
                              worker_init_fn=worker_init_fn)
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
@@ -287,6 +287,14 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             lab_a_bg, lab_b_bg = label_batch[:sub_bs] == 0, label_batch[sub_bs:args.labeled_bs] == 0
             unimg_a, unimg_b = volume_batch[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch[
                                                                                        args.labeled_bs + sub_bs:]
+            # strong augmentation
+            volume_batch_strong, label_batch_strong,  = sampled_batch['image_strong'], sampled_batch['label_strong']
+            volume_batch_strong, label_batch_strong,  = volume_batch_strong.cuda(), label_batch_strong.cuda()
+            img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
+            lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
+            lab_a_bg_s, lab_b_bg_s = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0
+            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[
+                                                                                       args.labeled_bs + sub_bs:]
 
             with torch.no_grad():
                 unoutput_a_fg,unoutput_a, unoutput_a_bg, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a)
@@ -299,13 +307,21 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 plab_b_bg = get_cut_mask(unoutput_b_bg, nms=1)
                 img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
 
+                # strong augmentation
+                unoutput_a_fg_s,unoutput_a_s, unoutput_a_bg_s, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a_s)
+                unoutput_b_fg_s,unoutput_b_s, unoutput_b_bg_s, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b_s)
+                # plab_a_s = get_cut_mask(unoutput_a_s, nms=1)
+                # plab_b_s = get_cut_mask(unoutput_b_s, nms=1)
+                plab_a_fg_s = get_cut_mask(unoutput_a_fg_s, nms=1)
+                plab_b_fg_s = get_cut_mask(unoutput_b_fg_s, nms=1)
+                plab_a_bg_s = get_cut_mask(unoutput_a_bg_s, nms=1)
+                plab_b_bg_s = get_cut_mask(unoutput_b_bg_s, nms=1)
+
             mixl_img = img_a * img_mask + unimg_a * (1 - img_mask)
             mixu_img = unimg_b * img_mask + img_b * (1 - img_mask)
             ####
             mixl_lab = lab_a * img_mask + plab_a * (1 - img_mask)
             mixu_lab = plab_b * img_mask + lab_b * (1 - img_mask)
-            mixl_lab_bg = lab_a_bg * img_mask + plab_a_bg * (1 - img_mask)
-            mixu_lab_bg = plab_b_bg * img_mask + lab_b_bg * (1 - img_mask)
             ####
             outputs_l_fg,outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img)
             outputs_u_fg,outputs_u, outputs_u_bg, sdm_outputs_u, sdm_outputs_u_bg = model(mixu_img)
@@ -321,7 +337,32 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                               +consistency_criterion(F.softmax(outputs_u, dim=1), F.softmax((outputs_u_fg), dim=1))
                               )
             consistency_weight = get_current_consistency_weight(iter_num // 150)
-            loss = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * (loss_consist_l + loss_consist_u)
+            loss_origin = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * (loss_consist_l + loss_consist_u)
+            
+            # strong augmentation
+            mixl_img_s = img_a_s * img_mask + unimg_a_s * (1 - img_mask)
+            mixu_img_s = unimg_b_s * img_mask + img_b_s * (1 - img_mask)
+            ####
+
+            # outputs = model(mixl_img_s)
+            # print(len(outputs))
+            outputs_l_fg_s, outputs_l_s, outputs_l_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img_s)
+            outputs_u_fg_s, outputs_u_s, outputs_u_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixu_img_s)
+            loss_l_s = mix_loss(outputs_l_fg_s, lab_a_s, plab_a_fg_s, loss_mask, u_weight=args.u_weight)
+            loss_u_s = mix_loss(outputs_u_fg_s, plab_b_fg_s, lab_b_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            loss_l_bg_s = mix_loss(outputs_l_bg_s, lab_a_bg_s, plab_a_bg_s, loss_mask, u_weight=args.u_weight)
+            loss_u_bg_s = mix_loss(outputs_u_bg_s, plab_b_bg_s, lab_b_bg_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            ### Bidirectional Consistency Loss
+            loss_consist_l_s = (consistency_criterion(F.softmax(outputs_l_fg_s, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
+                              +consistency_criterion(F.softmax(outputs_l_s, dim=1), F.softmax((outputs_l_fg_s), dim=1))
+                              )
+            loss_consist_u_s = (consistency_criterion(F.softmax(outputs_u_fg_s, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
+                              +consistency_criterion(F.softmax(outputs_u_s, dim=1), F.softmax((outputs_u_fg_s), dim=1))
+                              )
+            # consistency_weight = get_current_consistency_weight(iter_num // 150)
+            loss_s = loss_l_s + loss_u_s + loss_l_bg_s + loss_u_bg_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
+            
+            loss = loss_origin + loss_s
 
             iter_num += 1
             writer.add_scalar('Self/consistency', consistency_weight, iter_num)
@@ -442,7 +483,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
