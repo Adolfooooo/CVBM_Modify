@@ -18,7 +18,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables, context_mask_pancreas
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='../data/Pancreas', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
@@ -187,7 +187,7 @@ def pre_train(args, snapshot_path):
             if iter_num % 200 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas(model, num_classes=num_classes, patch_size=patch_size,
-                                                                  stride_xy=16, stride_z=16)
+                                                                  stride_xy=16, stride_z=16, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
                     save_mode_path = os.path.join(snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
@@ -399,15 +399,15 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "../model/CVBM/Pancreas_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "../model/CVBM/Pancreas_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM/Pancreas_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM/Pancreas_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
-    shutil.copy('../code/Pancreas_train.py', self_snapshot_path)
+    shutil.copy('./Pancreas_train.py', self_snapshot_path)
     # -- Pre-Training
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
