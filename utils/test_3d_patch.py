@@ -1,3 +1,4 @@
+import os
 import h5py
 import math
 import nibabel as nib
@@ -19,10 +20,11 @@ def getLargestCC(segmentation):
     return largestCC
 
 
-def var_all_case_LA(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4):
-    with open('/home/xuminghao/Datasets/LA/LA_UA-MT_Version/test.list', 'r') as f:
+def var_all_case_LA(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, dataset_path=None):
+    assert type(dataset_path) is str
+    with open(dataset_path + '/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["/home/xuminghao/Datasets/LA/LA_UA-MT_Version/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in
+    image_list = [dataset_path + '/2018LA_Seg_Training Set/' + item.replace('\n', '') + "/mri_norm2.h5" for item in
                   image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
@@ -41,10 +43,11 @@ def var_all_case_LA(model, num_classes, patch_size=(112, 112, 80), stride_xy=18,
     return avg_dice
 
 
-def var_all_case_LA_bg(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4):
-    with open('/home/xuminghao/Datasets/LA/LA_UA-MT_Version/test.list', 'r') as f:
+def var_all_case_LA_bg(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, dataset_path=None):
+    assert type(dataset_path) is str
+    with open(dataset_path + '/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["/home/xuminghao/Datasets/LA/LA_UA-MT_Version/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for item in
+    image_list = [dataset_path + '/2018LA_Seg_Training Set/' + item.replace('\n', '') + "/mri_norm2.h5" for item in
                   image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
@@ -63,10 +66,12 @@ def var_all_case_LA_bg(model, num_classes, patch_size=(112, 112, 80), stride_xy=
     return avg_dice
 
 
-def var_all_case_Pancreas(model, num_classes, patch_size=(96, 96, 96), stride_xy=16, stride_z=16):
-    with open('/root/Pancreas/test.list', 'r') as f:
+def var_all_case_Pancreas(model, num_classes, patch_size=(96, 96, 96), stride_xy=16, stride_z=16, dataset_path=None):
+    # dataset_path = '/root/Pancreas'
+    assert type(dataset_path) is str
+    with open(dataset_path + '/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["/root/Pancreas/Pancreas_h5/" + item.replace('\n', '') + "_norm.h5" for item in image_list]
+    image_list = [dataset_path + '/Pancreas_h5/' + item.replace('\n', '') + "_norm.h5" for item in image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
     for image_path in loader:
@@ -298,10 +303,12 @@ def test_single_case_btcv(model, image, stride_xy, stride_z, patch_size, num_cla
     return label_map, score_map
 
 
-def var_all_case_LA_plus(model_l, model_r, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4):
-    with open('/data/byh_data/SSNet_data/LA/test.list', 'r') as f:
+def var_all_case_LA_plus(model_l, model_r, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, dataset_path=None):
+    # originally, dataset_path is  'data/byh_data/SSNet_data/LA/'
+    assert type(dataset_path) is str
+    with open(dataset_path + '/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = ["/data/byh_data/SSNet_data/LA/2018LA_Seg_Training Set/" + item.replace('\n', '') + "/mri_norm2.h5" for
+    image_list = [dataset_path + '/2018LA_Seg_Training Set/' + item.replace('\n', '') + "/mri_norm2.h5" for
                   item in image_list]
     loader = tqdm(image_list)
     total_dice = 0.0

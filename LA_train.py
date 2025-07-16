@@ -18,7 +18,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/LA/LA_UA-MT_Version', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')

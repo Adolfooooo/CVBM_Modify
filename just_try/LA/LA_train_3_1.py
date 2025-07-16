@@ -26,7 +26,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/LA/LA_UA-MT_Version', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
@@ -35,9 +35,9 @@ parser.add_argument('--max_samples', type=int, default=80, help='maximum samples
 parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
 parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
-parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
+parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=4, help='trained samples')
-parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
@@ -208,7 +208,7 @@ def pre_train(args, snapshot_path):
             if iter_num % 200 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_LA(model, num_classes=num_classes, patch_size=patch_size,
-                                                            stride_xy=18, stride_z=4)
+                                                            stride_xy=18, stride_z=4, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
                     save_mode_path = os.path.join(snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
@@ -387,7 +387,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             if iter_num % 200 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_LA(model, num_classes=num_classes, patch_size=patch_size,
-                                                            stride_xy=18, stride_z=4)
+                                                            stride_xy=18, stride_z=4, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
                     save_mode_path = os.path.join(self_snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
@@ -480,7 +480,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
