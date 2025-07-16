@@ -343,9 +343,6 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             mixl_img_s = img_a_s * img_mask + unimg_a_s * (1 - img_mask)
             mixu_img_s = unimg_b_s * img_mask + img_b_s * (1 - img_mask)
             ####
-
-            # outputs = model(mixl_img_s)
-            # print(len(outputs))
             outputs_l_fg_s, outputs_l_s, outputs_l_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img_s)
             outputs_u_fg_s, outputs_u_s, outputs_u_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixu_img_s)
             loss_l_s = mix_loss(outputs_l_fg_s, lab_a_s, plab_a_fg_s, loss_mask, u_weight=args.u_weight)
@@ -483,7 +480,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')

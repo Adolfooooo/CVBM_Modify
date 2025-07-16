@@ -787,7 +787,7 @@ class DualAugmentTransform:
         if is_label:
             return tensor.long()
         else:
-            
+            tensor = tensor.unsqueeze(0)
             return tensor.float()
         
     def _create_augmenters(self, config, seed):
