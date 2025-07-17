@@ -1,11 +1,10 @@
 import argparse
-
 import logging
-
 import os
 import random
 import shutil
 import sys
+import time
 
 import numpy as np
 import torch
@@ -322,7 +321,7 @@ def pre_train(args, snapshot_path):
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
-            if iter_num % 20 == 0:
+            if iter_num % 200 == 0:
                 image = net_input[1, 0:1, :, :]
                 writer.add_image('pre_train/Mixed_Image', image, iter_num)
                 outputs = torch.argmax(torch.softmax(out_mixl, dim=1), dim=1, keepdim=True)
@@ -556,8 +555,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.seed)
 
     # -- path to save models
-    pre_snapshot_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
