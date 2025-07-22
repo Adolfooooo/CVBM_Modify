@@ -146,6 +146,7 @@ def pre_train(args, snapshot_path):
         for _, sampled_batch in enumerate(trainloader):
             volume_batch, label_batch = sampled_batch['image'][:args.labeled_bs], sampled_batch['label'][
                                                                                   :args.labeled_bs]
+            
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:]
@@ -176,7 +177,7 @@ def pre_train(args, snapshot_path):
             iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
-            writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
+            # writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
 
             optimizer.zero_grad()
@@ -184,7 +185,7 @@ def pre_train(args, snapshot_path):
             optimizer.step()
             logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f,loss_sdf: %03f' % (
                 iter_num, loss, loss_seg_dice, loss_seg, loss_sdf))
-            if iter_num % 200 == 0:
+            if iter_num % 50 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas(model, num_classes=num_classes, patch_size=patch_size,
                                                                   stride_xy=16, stride_z=16, dataset_path=args.root_path)
@@ -236,8 +237,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
     pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
-    load_net(model, pretrained_model)
-    load_net(ema_model, pretrained_model)
+    # load_net(model, pretrained_model)
+    # load_net(ema_model, pretrained_model)
 
     model.train()
     ema_model.train()
@@ -413,7 +414,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')

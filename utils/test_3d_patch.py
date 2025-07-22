@@ -200,7 +200,7 @@ def test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=
         image = np.pad(image, [(wl_pad, wr_pad), (hl_pad, hr_pad), (dl_pad, dr_pad)], mode='constant',
                        constant_values=0)
     ww, hh, dd = image.shape
-
+    # 窗口可滑动的次数
     sx = math.ceil((ww - patch_size[0]) / stride_xy) + 1
     sy = math.ceil((hh - patch_size[1]) / stride_xy) + 1
     sz = math.ceil((dd - patch_size[2]) / stride_z) + 1
@@ -219,6 +219,7 @@ def test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=
                 test_patch = torch.from_numpy(test_patch).cuda()
 
                 with torch.no_grad():
+                    # y1: ([1, 2, 96, 96, 96])
                     y1, _, _, _, _ = model(test_patch)
                     # y1,_= model(test_patch)
                     y = F.softmax(y1, dim=1)
