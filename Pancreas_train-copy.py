@@ -206,6 +206,7 @@ def pre_train(args, snapshot_path):
                 break
 
         if iter_num >= pre_max_iterations:
+            save_net_opt(model, optimizer, os.path.join(snapshot_path, 'iter_{}_dice.pth'.format(iter_num)))
             iterator.close()
             break
     writer.close()
@@ -414,7 +415,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
