@@ -2,5 +2,6 @@ matplotlib
 tensorboardX
 medpy
 h5py
+tqdm
 scikit-image
 nibabel
