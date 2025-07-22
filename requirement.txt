@@ -1,0 +1,6 @@
+matplotlib
+tensorboardX
+medpy
+h5py
+scikit-image
+nibabel
