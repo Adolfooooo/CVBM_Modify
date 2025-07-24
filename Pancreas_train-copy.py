@@ -146,7 +146,7 @@ def pre_train(args, snapshot_path):
         for _, sampled_batch in enumerate(trainloader):
             volume_batch, label_batch = sampled_batch['image'][:args.labeled_bs], sampled_batch['label'][
                                                                                   :args.labeled_bs]
-            
+            # volume_batch, label_batch: ([2, 1, 96, 96, 96], [2, 96, 96, 96])
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:]
@@ -161,7 +161,7 @@ def pre_train(args, snapshot_path):
             loss_seg = 0
             loss_seg_dice = 0
             loss_sdf = 0
-
+            
             y2 = outputs_fg[:args.labeled_bs, ...]
             y_prob2 = F.softmax(y2, dim=1)
             loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
@@ -171,8 +171,8 @@ def pre_train(args, snapshot_path):
             y_prob_bg = F.softmax(y_bg, dim=1)
             loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
             loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
-
             loss = (loss_seg + loss_seg_dice) / 2
+            logging.info("y_prob2: {}, y_prob_bg: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), torch.argmax(y_prob_bg, dim=1).sum(), label_batch.sum()))
 
             iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
@@ -185,7 +185,7 @@ def pre_train(args, snapshot_path):
             optimizer.step()
             logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f,loss_sdf: %03f' % (
                 iter_num, loss, loss_seg_dice, loss_seg, loss_sdf))
-            if iter_num % 200 == 0:
+            if iter_num % 20 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas(model, num_classes=num_classes, patch_size=patch_size,
                                                                   stride_xy=16, stride_z=16, dataset_path=args.root_path)
@@ -401,8 +401,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "./results/CVBM/Pancreas_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM/Pancreas_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM/test/Pancreas_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM/test/Pancreas_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
