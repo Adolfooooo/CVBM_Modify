@@ -255,6 +255,79 @@ class RandomCrop(object):
         else:
             return {'image': image, 'label': label}
 
+        
+
+class RandomCrop_Test(object):
+    """
+    Crop randomly the image in a sample
+    Args:
+    output_size (int): Desired output size
+    """
+
+    def __init__(self, output_size, with_sdf=False):
+        self.output_size = output_size
+        self.with_sdf = with_sdf
+        self.num_iter = 1
+
+    def __call__(self, sample):
+        image, label = sample['image'], sample['label']
+        for indice_d in range(image.shape[2]):
+             # 可视化
+            image_clipped = np.clip(image[:, :, indice_d], 0, 1)
+
+            # 然后缩放到[0,255]
+            image_visual = (image_clipped * 255).astype(np.uint8)
+
+            # # 创建RGB图像（将灰度图转换为3通道）
+            # image_rgb = np.stack([image_visual, image_visual, image_visual], axis=-1)
+            # # 将标签区域设置为红色（保持原图亮度，但添加红色通道）
+            # mask = label[:, :, indice_d] > 0
+
+            # alpha = 0.3  # 透明度
+            # image_rgb[mask, 0] = np.clip(image_rgb[mask, 0] * (1-alpha) + 255 * alpha, 0, 255)
+
+            plt.figure(figsize=(10, 4))
+            plt.subplot(1, 2, 1)
+            # 子图1：标准灰度显示
+            plt.imshow(image_visual, cmap='gray', vmin=0, vmax=255)
+            plt.colorbar()
+            plt.subplot(1, 2, 2)
+            plt.imshow(label[:, :, indice_d], cmap='jet', vmin=0, vmax=1)
+            plt.colorbar()
+            # plt.imsave('images/iter{} label{}.png'.format(self.num_iter, label.sum()), cmap='gray', vmin=0, vmax=255)
+            plt.savefig("images/iter{}_label{}.png".format(self.num_iter, label[:,:,indice_d].sum()), bbox_inches='tight', dpi=150)
+            plt.close()
+            self.num_iter+=1
+
+
+        if self.with_sdf:
+            sdf = sample['sdf']
+
+        # pad the sample if necessary
+        if label.shape[0] <= self.output_size[0] or label.shape[1] <= self.output_size[1] or label.shape[2] <= \
+                self.output_size[2]:
+            pw = max((self.output_size[0] - label.shape[0]) // 2 + 3, 0)
+            ph = max((self.output_size[1] - label.shape[1]) // 2 + 3, 0)
+            pd = max((self.output_size[2] - label.shape[2]) // 2 + 3, 0)
+            image = np.pad(image, [(pw, pw), (ph, ph), (pd, pd)], mode='constant', constant_values=0)
+            label = np.pad(label, [(pw, pw), (ph, ph), (pd, pd)], mode='constant', constant_values=0)
+            if self.with_sdf:
+                sdf = np.pad(sdf, [(pw, pw), (ph, ph), (pd, pd)], mode='constant', constant_values=0)
+
+        (w, h, d) = image.shape
+
+        w1 = np.random.randint(0, w - self.output_size[0])
+        h1 = np.random.randint(0, h - self.output_size[1])
+        d1 = np.random.randint(0, d - self.output_size[2])
+
+        label = label[w1:w1 + self.output_size[0], h1:h1 + self.output_size[1], d1:d1 + self.output_size[2]]
+        image = image[w1:w1 + self.output_size[0], h1:h1 + self.output_size[1], d1:d1 + self.output_size[2]]
+        if self.with_sdf:
+            sdf = sdf[w1:w1 + self.output_size[0], h1:h1 + self.output_size[1], d1:d1 + self.output_size[2]]
+            return {'image': image, 'label': label, 'sdf': sdf}
+        else:
+            return {'image': image, 'label': label}
+
 
 class RandomRotFlip(object):
     """
