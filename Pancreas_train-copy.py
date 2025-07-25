@@ -117,7 +117,7 @@ def pre_train(args, snapshot_path):
     db_train = Pancreas(base_dir=train_data_path,
                         split='train',
                         transform=transforms.Compose([
-                            RandomCrop(patch_size),
+                            RandomCrop_Test(patch_size),
                             ToTensor(),
                         ]))
     labelnum = args.labelnum
