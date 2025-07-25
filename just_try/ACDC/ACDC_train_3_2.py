@@ -31,14 +31,14 @@ parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
-parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
+parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
 # label and unlabel
 parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
-parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
+parser.add_argument('--labelnum', type=int, default=7, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
@@ -373,6 +373,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
 
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
+    model_s = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     for param in ema_model.parameters():
         param.detach_()  # ema_model set
@@ -403,6 +404,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    optimizer = optim.SGD(model_s.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
     load_net(ema_model, pre_trained_model)
     load_net_opt(model, optimizer, pre_trained_model)
@@ -504,17 +506,17 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             ### Bidirectional Consistency Loss
             # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
 
-            loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), 1 - F.softmax((out_l_bg), dim=1))
+            loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), F.softmax((1- out_l_bg), dim=1))
                                 +consistency_criterion(F.softmax(out_l, dim=1), F.softmax((out_l_fg), dim=1))
                                 )
-            loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), 1 - F.softmax((out_unl_bg), dim=1))
+            loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), F.softmax((1 - out_unl_bg), dim=1))
                                 +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
                                 )
             loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             # strong
-            out_unl_fg_s,out_unl_s, out_unl_bg_s, _, _ = model(net_input_unl_s)
-            out_l_fg_s,out_l_s, out_l_bg_s, _, _ = model(net_input_l_s)
+            out_unl_fg_s,out_unl_s, out_unl_bg_s, _, _ = model_s(net_input_unl_s)
+            out_l_fg_s,out_l_s, out_l_bg_s, _, _ = model_s(net_input_l_s)
 
             unl_dice_s, unl_ce_s = mix_loss(out_unl_fg_s, plab_a_fg_s, lab_a_s, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice_s, l_ce_s = mix_loss(out_l_fg_s, lab_b_s, plab_b_fg_s, loss_mask, u_weight=args.u_weight)
@@ -527,10 +529,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_dice_s = unl_dice_s + l_dice_s + unl_dice_bg_s + l_dice_bg_s
             ### Bidirectional Consistency Loss
             # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
-            loss_consist_l_s = (consistency_criterion(F.softmax(out_l_fg_s, dim=1), 1 - F.softmax((out_l_bg_s), dim=1))
+            loss_consist_l_s = (consistency_criterion(F.softmax(out_l_fg_s, dim=1), F.softmax((1 - out_l_bg_s), dim=1))
                                 +consistency_criterion(F.softmax(out_l_s, dim=1), F.softmax((out_l_fg_s), dim=1))
                                 )
-            loss_consist_u_s = (consistency_criterion(F.softmax(out_unl_fg_s, dim=1), 1 - F.softmax((out_unl_bg_s), dim=1))
+            loss_consist_u_s = (consistency_criterion(F.softmax(out_unl_fg_s, dim=1), F.softmax((1 - out_unl_bg_s), dim=1))
                                 +consistency_criterion(F.softmax(out_unl_s, dim=1), F.softmax((out_unl_fg_s), dim=1))
                                 )
             loss_s =loss_dice_s + loss_ce_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
@@ -622,12 +624,12 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.seed)
 
     # -- path to save models
-    pre_snapshot_path = "./results/CVBM_3_1/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_3_1/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM_3_2/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./ACDC_train.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_3_2.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
