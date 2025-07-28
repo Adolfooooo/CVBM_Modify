@@ -4,7 +4,7 @@
 *.pth
 *copytest*
 __init__.py
-
+run_py.sh
 
 
 # folder
@@ -13,4 +13,5 @@ __init__.py
 **/__pychcache__/
 **/.git/
 **/.ipynb_checkpoints/
+**/images/
 

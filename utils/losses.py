@@ -595,3 +595,268 @@ class VAT3d(nn.Module):
 def update_ema_variables(model, ema_model, alpha):
     for ema_param, param in zip(ema_model.parameters(), model.parameters()):
         ema_param.data.mul_(alpha).add_((1 - alpha) * param.data)
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss实现
+    
+    Args:
+        alpha (float or tensor): 类别权重，用于平衡正负样本
+        gamma (float): 调制因子，控制难易样本的权重差异
+        reduction (str): 损失聚合方式 ('none', 'mean', 'sum')
+        ignore_index (int): 忽略的类别索引
+    """
+    
+    def __init__(self, alpha=1.0, gamma=2.0, reduction='mean', ignore_index=-100):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+    
+    def forward(self, inputs, targets):
+        """
+        前向传播
+        
+        Args:
+            inputs: 模型预测logits, shape: (N, C) 或 (N, C, H, W)
+            targets: 真实标签, shape: (N,) 或 (N, H, W)
+        
+        Returns:
+            focal loss值
+        """
+        # 计算交叉熵损失，不进行reduction
+        ce_loss = F.cross_entropy(inputs, targets, 
+                                reduction='none', 
+                                ignore_index=self.ignore_index)
+        
+        # 计算预测概率
+        pt = torch.exp(-ce_loss)  # pt = p_t (预测正确类别的概率)
+        
+        # 计算alpha权重
+        if isinstance(self.alpha, (float, int)):
+            alpha_t = self.alpha
+        else:
+            # 如果alpha是tensor，需要根据targets选择对应的alpha值
+            alpha_t = self.alpha.gather(0, targets)
+        
+        # 计算focal loss
+        focal_loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
+        
+        # 根据reduction参数聚合损失
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+# 多类别版本的Focal Loss
+class MultiClassFocalLoss(nn.Module):
+    """
+    多类别Focal Loss，支持为每个类别设置不同的alpha权重
+    """
+    
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(MultiClassFocalLoss, self).__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        
+        # 设置类别权重
+        if alpha is not None:
+            if isinstance(alpha, list):
+                self.alpha = torch.tensor(alpha, dtype=torch.float32)
+            else:
+                self.alpha = alpha
+        else:
+            self.alpha = None
+    
+    def forward(self, inputs, targets):
+        # 计算softmax概率
+        log_pt = F.log_softmax(inputs, dim=1)
+        pt = torch.exp(log_pt)
+        
+        # 选择目标类别的概率
+        log_pt = log_pt.gather(1, targets.unsqueeze(1)).squeeze(1)
+        pt = pt.gather(1, targets.unsqueeze(1)).squeeze(1)
+        
+        # 应用alpha权重
+        if self.alpha is not None:
+            if self.alpha.device != targets.device:
+                self.alpha = self.alpha.to(targets.device)
+            alpha_t = self.alpha.gather(0, targets)
+            log_pt = alpha_t * log_pt
+        
+        # 计算focal loss
+        focal_loss = -((1 - pt) ** self.gamma) * log_pt
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+class TverskyLoss(nn.Module):
+    """
+    Tversky Loss实现，主要用于分割任务
+    
+    Args:
+        alpha (float): 控制假正例(FP)的权重
+        beta (float): 控制假负例(FN)的权重
+        smooth (float): 平滑项，防止除零
+        reduction (str): 损失聚合方式
+    
+    Note:
+        - alpha=beta=0.5时退化为Dice Loss
+        - alpha>beta时更关注召回率(减少假负例)
+        - alpha<beta时更关注精确率(减少假正例)
+    """
+    
+    def __init__(self, alpha=0.7, beta=0.3, smooth=1e-7, reduction='mean'):
+        super(TverskyLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+        self.reduction = reduction
+    
+    def forward(self, inputs, targets):
+        """
+        前向传播
+        
+        Args:
+            inputs: 预测概率, shape: (N, C, H, W) 或 (N, C)
+            targets: 真实标签, shape: (N, H, W) 或 (N,)
+        """
+        # 如果inputs是logits，转换为概率
+        if inputs.dim() > 2:
+            # 分割任务：(N, C, H, W)
+            inputs = torch.softmax(inputs, dim=1)
+            
+            # 将targets转换为one-hot编码
+            num_classes = inputs.shape[1]
+            targets_one_hot = F.one_hot(targets, num_classes=num_classes)
+            targets_one_hot = targets_one_hot.permute(0, 3, 1, 2).float()
+            
+            # 计算每个类别的Tversky系数
+            tversky_scores = []
+            for class_idx in range(num_classes):
+                pred_class = inputs[:, class_idx]
+                target_class = targets_one_hot[:, class_idx]
+                
+                # 计算TP, FP, FN
+                tp = (pred_class * target_class).sum(dim=(1, 2))
+                fp = (pred_class * (1 - target_class)).sum(dim=(1, 2))
+                fn = ((1 - pred_class) * target_class).sum(dim=(1, 2))
+                
+                # 计算Tversky系数
+                tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+                tversky_scores.append(tversky)
+            
+            # 平均所有类别的Tversky系数
+            tversky_score = torch.stack(tversky_scores, dim=1).mean(dim=1)
+            
+        else:
+            # 分类任务：(N, C)
+            inputs = torch.softmax(inputs, dim=1)
+            targets_one_hot = F.one_hot(targets, num_classes=inputs.shape[1]).float()
+            
+            # 计算TP, FP, FN
+            tp = (inputs * targets_one_hot).sum(dim=1)
+            fp = (inputs * (1 - targets_one_hot)).sum(dim=1)
+            fn = ((1 - inputs) * targets_one_hot).sum(dim=1)
+            
+            # 计算Tversky系数
+            tversky_score = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        
+        # Tversky Loss = 1 - Tversky系数
+        tversky_loss = 1 - tversky_score
+        
+        if self.reduction == 'mean':
+            return tversky_loss.mean()
+        elif self.reduction == 'sum':
+            return tversky_loss.sum()
+        else:
+            return tversky_loss
+
+# 二分类专用的Tversky Loss
+class BinaryTverskyLoss(nn.Module):
+    """
+    二分类Tversky Loss，计算更简单高效
+    """
+    
+    def __init__(self, alpha=0.7, beta=0.3, smooth=1e-7):
+        super(BinaryTverskyLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+    
+    def forward(self, inputs, targets):
+        # 确保inputs是概率值
+        if inputs.dim() == 1 or (inputs.dim() == 2 and inputs.shape[1] == 1):
+            # 二分类sigmoid输出
+            inputs = torch.sigmoid(inputs).flatten()
+        else:
+            # 多类别输出的正类概率
+            inputs = torch.softmax(inputs, dim=1)[:, 1]
+        
+        targets = targets.float().flatten()
+        
+        # 计算TP, FP, FN
+        tp = (inputs * targets).sum()
+        fp = (inputs * (1 - targets)).sum()
+        fn = ((1 - inputs) * targets).sum()
+        
+        # 计算Tversky系数
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        
+        return 1 - tversky
+
+class BinaryTverskyLoss3D(nn.Module):
+    """
+    专门用于3D二分类分割的Tversky Loss
+    支持输入格式: [N, C, D, H, W] 和 [N, D, H, W]
+    """
+    
+    def __init__(self, alpha=0.7, beta=0.3, smooth=1e-7):
+        super(BinaryTverskyLoss3D, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+    
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: [N, C, D, H, W] 模型输出logits
+            targets: [N, D, H, W] 真实标签 (0或1)
+        """
+        # 确保inputs是概率值
+        if inputs.shape[1] == 1:
+            # 单类别输出，使用sigmoid
+            inputs = torch.sigmoid(inputs).squeeze(1)  # [N, D, H, W]
+        elif inputs.shape[1] == 2:
+            # 二类别输出，使用softmax取正类概率
+            inputs = torch.softmax(inputs, dim=1)[:, 1]  # [N, D, H, W]
+        else:
+            raise ValueError(f"Expected 1 or 2 classes, got {inputs.shape[1]}")
+        
+        # 确保targets是float类型
+        targets = targets.float()
+        
+        # 现在inputs和targets都是 [N, D, H, W]
+        # 将空间维度展平进行计算，保持batch维度
+        inputs_flat = inputs.view(inputs.shape[0], -1)    # [N, D*H*W]
+        targets_flat = targets.view(targets.shape[0], -1)  # [N, D*H*W]
+        
+        # 计算每个样本的TP, FP, FN
+        tp = (inputs_flat * targets_flat).sum(dim=1)                    # [N]
+        fp = (inputs_flat * (1 - targets_flat)).sum(dim=1)             # [N]
+        fn = ((1 - inputs_flat) * targets_flat).sum(dim=1)             # [N]
+        
+        # 计算Tversky系数
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        
+        # 返回平均loss
+        return (1 - tversky).mean()

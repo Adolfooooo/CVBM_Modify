@@ -4,18 +4,21 @@ from tensorboardX import SummaryWriter
 import shutil
 import argparse
 import logging
+
 import torch.optim as optim
 from torchvision import transforms
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
-from skimage.measure import label
 from torch.utils.data import DataLoader
-from utils import losses, ramps, test_3d_patch
+from skimage.measure import label
+
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
 from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables, context_mask_pancreas
+from utils import losses, ramps, test_3d_patch
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
@@ -117,7 +120,7 @@ def pre_train(args, snapshot_path):
     db_train = Pancreas(base_dir=train_data_path,
                         split='train',
                         transform=transforms.Compose([
-                            RandomCrop_Test(patch_size),
+                            RandomCrop(patch_size),
                             ToTensor(),
                         ]))
     labelnum = args.labelnum
@@ -135,6 +138,11 @@ def pre_train(args, snapshot_path):
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     DICE = losses.mask_DiceLoss(nclass=2)
     consistency_criterion = losses.mse_loss
+
+    # xuhao modify
+    focal_loss = losses.FocalLoss(alpha=2.0, gamma=2.0)
+    binary_tversky_loss = losses.BinaryTverskyLoss3D(alpha=0.7, beta=0.3)
+
     model.train()
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("{} itertations per epoch".format(len(trainloader)))
@@ -164,16 +172,21 @@ def pre_train(args, snapshot_path):
             
             y2 = outputs_fg[:args.labeled_bs, ...]
             y_prob2 = F.softmax(y2, dim=1)
-            loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-            loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
+            # loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+            # loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
+
+            loss_seg += focal_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+            loss_seg_dice += binary_tversky_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
 
             y_bg = outputs_bg[:args.labeled_bs, ...]
-            y_prob_bg = F.softmax(y_bg, dim=1)
-            loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-            loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
+            loss_seg += focal_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            loss_seg_dice += binary_tversky_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            # y_prob_bg = F.softmax(y_bg, dim=1)
+            # loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            # loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
             loss = (loss_seg + loss_seg_dice) / 2
-            logging.info("y_prob2: {}, y_prob_bg: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), torch.argmax(y_prob_bg, dim=1).sum(), label_batch.sum()))
-
+            # logging.info("y_prob2: {}, y_prob_bg: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), torch.argmax(y_prob_bg, dim=1).sum(), label_batch.sum()))
+            logging.info("y_prob2: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), label_batch.sum()))
             iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
