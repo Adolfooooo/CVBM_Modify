@@ -26,7 +26,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/LA/LA_UA-MT_Version', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
@@ -36,7 +36,7 @@ parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of lab
 parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
-parser.add_argument('--labelnum', type=int, default=4, help='trained samples')
+parser.add_argument('--labelnum', type=int, default=8, help='trained samples')
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
@@ -330,10 +330,10 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_bg, plab_a_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_bg, lab_b_bg, loss_mask, u_weight=args.u_weight, unlab=True)
             ### Bidirectional Consistency Loss
-            loss_consist_l = (consistency_criterion(F.softmax(outputs_l_fg, dim=1), F.softmax((1 - outputs_l_bg), dim=1))
+            loss_consist_l = (consistency_criterion(F.softmax(outputs_l_fg, dim=1), 1 - F.softmax((outputs_l_bg), dim=1))
                               +consistency_criterion(F.softmax(outputs_l, dim=1), F.softmax((outputs_l_fg), dim=1))
                               )
-            loss_consist_u = (consistency_criterion(F.softmax(outputs_u_fg, dim=1), F.softmax((1 - outputs_u_bg), dim=1))
+            loss_consist_u = (consistency_criterion(F.softmax(outputs_u_fg, dim=1), 1 - F.softmax((outputs_u_bg), dim=1))
                               +consistency_criterion(F.softmax(outputs_u, dim=1), F.softmax((outputs_u_fg), dim=1))
                               )
             consistency_weight = get_current_consistency_weight(iter_num // 150)
@@ -350,10 +350,10 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg_s = mix_loss(outputs_l_bg_s, lab_a_bg_s, plab_a_bg_s, loss_mask, u_weight=args.u_weight)
             loss_u_bg_s = mix_loss(outputs_u_bg_s, plab_b_bg_s, lab_b_bg_s, loss_mask, u_weight=args.u_weight, unlab=True)
             ### Bidirectional Consistency Loss
-            loss_consist_l_s = (consistency_criterion(F.softmax(outputs_l_fg_s, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
+            loss_consist_l_s = (consistency_criterion(F.softmax(outputs_l_fg_s, dim=1), 1 - F.softmax((outputs_l_bg_s), dim=1))
                               +consistency_criterion(F.softmax(outputs_l_s, dim=1), F.softmax((outputs_l_fg_s), dim=1))
                               )
-            loss_consist_u_s = (consistency_criterion(F.softmax(outputs_u_fg_s, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
+            loss_consist_u_s = (consistency_criterion(F.softmax(outputs_u_fg_s, dim=1), 1 - F.softmax((outputs_u_bg_s), dim=1))
                               +consistency_criterion(F.softmax(outputs_u_s, dim=1), F.softmax((outputs_u_fg_s), dim=1))
                               )
             # consistency_weight = get_current_consistency_weight(iter_num // 150)
@@ -466,8 +466,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "./results/CVBM_LA_train_3_1/1/LA_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_LA_train_3_1/1/LA_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "./results/CVBM_LA_train_3_1/2/LA_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
+    self_snapshot_path = "./results/CVBM_LA_train_3_1/2/LA_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
