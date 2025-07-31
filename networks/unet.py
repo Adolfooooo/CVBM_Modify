@@ -158,6 +158,52 @@ class CVBM2d(nn.Module):
 
         return out_seg1,final_out_seg1, out_seg1_bg,out_tanh1,out_tanh1_bg
 
+
+class CVBM2d_Argument(nn.Module):
+    def __init__(self, in_chns, class_num):
+        super(CVBM2d_Argument, self).__init__()
+
+        params1 = {'in_chns': in_chns,
+                  'feature_chns': [16, 32, 64, 128, 256],
+                  'dropout': [0.05, 0.1, 0.2, 0.3, 0.5],
+                  'class_num': class_num,
+                  'up_type': 1,
+                  'acti_func': 'relu'}
+        params2 = {'in_chns': in_chns,
+                  'feature_chns': [16, 32, 64, 128, 256],
+                  'dropout': [0.05, 0.1, 0.2, 0.3, 0.5],
+                  'class_num': class_num,
+                  'up_type': 0,
+                  'acti_func': 'relu'}
+        params3 = {'in_chns': in_chns,
+                  'feature_chns': [16, 32, 64, 128, 256],
+                  'dropout': [0.05, 0.1, 0.2, 0.3, 0.5],
+                  'class_num': class_num,
+                  'up_type': 2,
+                  'acti_func': 'relu'}
+        self.encoder = Encoder(params1)
+        self.decoder_fg = Decoder(params1)
+
+        self.decoder_bg = Decoder(params3)
+
+        self.final_seg = nn.Conv2d(params3['class_num'] * 2, params3['class_num'], 1, padding=0)
+
+        self.final_seg_tanh = nn.Conv2d(params3['class_num'] * 2, params3['class_num'], 1, padding=0)
+
+
+    def forward(self, input_fg, input_bg):
+        features_fg = self.encoder(input_fg)
+        features_bg = self.encoder(input_bg)
+
+        out_seg_fg,out_tanh_fg = self.decoder_fg(features_fg)
+
+        out_seg_bg,out_tanh_bg = self.decoder_bg(features_bg)
+
+        final_out_seg = self.final_seg(torch.cat((out_seg_fg, out_seg_bg), dim=1))
+
+        return out_seg_fg, final_out_seg, out_seg_bg, out_tanh_fg, out_tanh_bg
+
+
 if __name__ == '__main__':
     # compute FLOPS & PARAMETERS
     from thop import profile

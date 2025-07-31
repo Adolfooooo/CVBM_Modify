@@ -301,7 +301,7 @@ class CVBM(nn.Module):
 class CVBM_Argument(nn.Module):
     def __init__(self, n_channels=3, n_classes=2, n_filters=16, normalization='none', has_dropout=False,
                  has_residual=False):
-        super(CVBM, self).__init__()
+        super(CVBM_Argument, self).__init__()
 
         self.encoder = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
 

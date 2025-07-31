@@ -28,7 +28,7 @@ from networks.CVBM import CVBM, CVBM_Argument
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
-parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
+parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
@@ -251,8 +251,9 @@ def pre_train(args, snapshot_path):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
-
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
+        
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train_4_1")
+    # model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -306,7 +307,7 @@ def pre_train(args, snapshot_path):
             onehot_gt_mixl = onehot_lab_a * img_mask + onehot_lab_b * (1 - img_mask)
             # -- original
             net_input = img_a * img_mask + img_b * (1 - img_mask)
-            out_mixl_fg,out_mixl, outputs_mixl_bg, _, _ = model(net_input)
+            out_mixl_fg,out_mixl, outputs_mixl_bg, _, _ = model(net_input, net_input)
             loss_dice, loss_ce = mix_loss(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
             loss_dice_bg, loss_ce_bg = onehot_mix_loss(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
                                                        unlab=True)
@@ -458,8 +459,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a)
                 pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b)
-                plab_a = get_ACDC_masks(pre_a, nms=1)
-                plab_b = get_ACDC_masks(pre_b, nms=1)
+                # plab_a = get_ACDC_masks(pre_a, nms=1)
+                # plab_b = get_ACDC_masks(pre_b, nms=1)
                 plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
                 plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
                 plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
