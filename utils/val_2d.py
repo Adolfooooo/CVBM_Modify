@@ -46,6 +46,47 @@ def test_single_image(image, label, model, classes, patch_size=[448, 448]):
     return metric_list
 
 
+def test_single_image_CVBM_Argument(image, label, model, classes, patch_size=[448, 448]):
+    image, label = image.squeeze(0).cpu().detach(
+    ).numpy(), label.squeeze(0).cpu().detach().numpy()
+    stride_xy=412
+    ww, hh = image.shape
+
+    sx = math.ceil((ww - patch_size[0]) / stride_xy) + 1
+    sy = math.ceil((hh - patch_size[1]) / stride_xy) + 1
+
+    # print("{}, {}, {}".format(sx, sy, sz))
+    score_map = np.zeros((classes,) + image.shape).astype(np.float32)
+    cnt = np.zeros(image.shape).astype(np.float32)
+
+    for x in range(0, sx):
+        xs = min(stride_xy * x, ww - patch_size[0])
+        for y in range(0, sy):
+            ys = min(stride_xy * y, hh - patch_size[1])
+
+            test_patch = image[xs:xs + patch_size[0], ys:ys + patch_size[1]]
+            test_patch = np.expand_dims(np.expand_dims(test_patch, axis=0), axis=0).astype(np.float32)
+            test_patch = torch.from_numpy(test_patch).cuda()
+
+            with torch.no_grad():
+                y1 = model(test_patch, test_patch)[0]
+                # y1,_= model(test_patch)
+                y = F.softmax(y1, dim=1)
+
+            y = y.cpu().data.numpy()
+            y = y[0, 1, :, :]
+            score_map[:, xs:xs + patch_size[0], ys:ys + patch_size[1]] \
+                = score_map[:, xs:xs + patch_size[0], ys:ys + patch_size[1]] + y
+            cnt[xs:xs + patch_size[0], ys:ys + patch_size[1]] \
+                = cnt[xs:xs + patch_size[0], ys:ys + patch_size[1]] + 1
+    score_map = score_map / np.expand_dims(cnt, axis=0)
+    label_map = (score_map[0] > 0.5).astype(np.int)
+    metric_list = []
+    for i in range(1, classes):
+        metric_list.append(calculate_metric_percase(label_map == i, label == i))
+    return metric_list
+
+
 def calculate_metric_percase(pred, gt):
     pred[pred > 0] = 1
     gt[gt > 0] = 1

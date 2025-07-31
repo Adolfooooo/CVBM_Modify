@@ -296,6 +296,33 @@ class CVBM(nn.Module):
     
         return out_seg1,final_out_seg1, out_seg1_bg,out_tanh1,out_tanh1_bg
 
+
+# apply strong argument to bg network
+class CVBM_Argument(nn.Module):
+    def __init__(self, n_channels=3, n_classes=2, n_filters=16, normalization='none', has_dropout=False,
+                 has_residual=False):
+        super(CVBM, self).__init__()
+
+        self.encoder = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
+
+        self.decoder_fg = Decoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual, 0)
+        self.decoder_bg = Decoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual, 2)
+
+        self.final_seg1 = nn.Conv3d(n_classes * 2, n_classes, 1, padding=0)
+        self.final_seg1_tanh = nn.Conv3d(n_classes * 2, n_classes, 1, padding=0)
+
+    def forward(self, input_fg, input_bg):
+        features_fg = self.encoder(input_fg)
+        features_bg = self.encoder(input_bg)
+
+        out_seg1,out_tanh1 = self.decoder_fg(features_fg)
+        out_seg1_bg,out_tanh1_bg = self.decoder_bg(features_bg)
+        
+        final_out_seg1 = self.final_seg1(torch.cat((out_seg1, out_seg1_bg), dim=1))
+
+        return out_seg1,final_out_seg1, out_seg1_bg,out_tanh1,out_tanh1_bg
+
+
 if __name__ == '__main__':
     # compute FLOPS & PARAMETERS
     from thop import profile
