@@ -19,7 +19,7 @@ from utils.BCP_utils import context_mask, mix_loss, update_ema_variables, contex
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_Pancreas', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
@@ -41,6 +41,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM/1', help='snapshot path')
 args = parser.parse_args()
 
 
@@ -135,6 +136,9 @@ def pre_train(args, snapshot_path):
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     DICE = losses.mask_DiceLoss(nclass=2)
     consistency_criterion = losses.mse_loss
+    # xuhao modify
+    focal_loss = losses.FocalLoss(alpha=2.0, gamma=2.0)
+    binary_tversky_loss = losses.BinaryTverskyLoss3D(alpha=0.7, beta=0.3)
     model.train()
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("{} itertations per epoch".format(len(trainloader)))
@@ -163,14 +167,20 @@ def pre_train(args, snapshot_path):
             loss_sdf = 0
 
             y2 = outputs_fg[:args.labeled_bs, ...]
-            y_prob2 = F.softmax(y2, dim=1)
-            loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-            loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
+            # y_prob2 = F.softmax(y2, dim=1)
+            # loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+            # loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
 
             y_bg = outputs_bg[:args.labeled_bs, ...]
-            y_prob_bg = F.softmax(y_bg, dim=1)
-            loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-            loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
+            # y_prob_bg = F.softmax(y_bg, dim=1)
+            # loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            # loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
+            loss_seg += focal_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+            loss_seg_dice += binary_tversky_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+
+            y_bg = outputs_bg[:args.labeled_bs, ...]
+            loss_seg += focal_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            loss_seg_dice += binary_tversky_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
 
             loss = (loss_seg + loss_seg_dice) / 2
 
@@ -237,8 +247,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
     pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
-    # load_net(model, pretrained_model)
-    # load_net(ema_model, pretrained_model)
+    load_net(model, pretrained_model)
+    load_net(ema_model, pretrained_model)
 
     model.train()
     ema_model.train()
@@ -321,7 +331,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             if iter_num % 200 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas(model, num_classes=num_classes, patch_size=patch_size,
-                                                                  stride_xy=16, stride_z=16)
+                                                                  stride_xy=16, stride_z=16, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
                     save_mode_path = os.path.join(self_snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
@@ -400,8 +410,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "./results/CVBM/1/Pancreas_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM/1/Pancreas_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
+    self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
@@ -420,6 +430,6 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # self_train(args, pre_snapshot_path, self_snapshot_path)
+    self_train(args, pre_snapshot_path, self_snapshot_path)
 
 

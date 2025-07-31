@@ -16,7 +16,7 @@ from networks.net_factory import net_factory
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC/', help='Name of Experiment')
-parser.add_argument('--exp', type=str, default='CVBM2d', help='experiment_name')
+parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--num_classes', type=int,  default=4, help='output channel of network')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
@@ -34,8 +34,8 @@ def calculate_metric_percase(pred, gt):
     return dice, jc, hd95, asd
 
 
-def test_single_volume(case, net, test_save_path, FLAGS):
-    h5f = h5py.File(FLAGS.root_path + "/data/{}.h5".format(case), 'r')
+def test_single_volume(case, net, test_save_path, args):
+    h5f = h5py.File(args.root_path + "/data/{}.h5".format(case), 'r')
     image = h5f['image'][:]
     label = h5f['label'][:]
     prediction = np.zeros_like(label)
@@ -80,17 +80,17 @@ def test_single_volume(case, net, test_save_path, FLAGS):
     return first_metric, second_metric, third_metric
 
 
-def Inference(FLAGS):
-    with open(FLAGS.root_path + '/test.list', 'r') as f:
+def Inference(args):
+    with open(args.root_path + '/test.list', 'r') as f:
         image_list = f.readlines()
     image_list = sorted([item.replace('\n', '').split(".")[0] for item in image_list])
-    snapshot_path = "{}/ACDC_{}_{}_labeled/{}".format(FLAGS.snapshot_path, FLAGS.exp, FLAGS.labelnum, FLAGS.stage_name)
-    test_save_path = "{}/ACDC_{}_{}_labeled/{}_predictions/".format(FLAGS.snapshot_path, FLAGS.exp, FLAGS.labelnum, FLAGS.model)
+    snapshot_path = "{}/{}_{}_labeled/{}".format(args.snapshot_path, args.exp, args.labelnum, args.stage_name)
+    test_save_path = "{}/{}_{}_labeled/{}_predictions/".format(args.snapshot_path, args.exp, args.labelnum, args.model)
     if os.path.exists(test_save_path):
         shutil.rmtree(test_save_path)
     os.makedirs(test_save_path)
-    net = net_factory(net_type=FLAGS.model, in_chns=1, class_num=FLAGS.num_classes)
-    save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(FLAGS.model))
+    net = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes)
+    save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
     net.load_state_dict(torch.load(save_model_path))
 
     print("init weight from {}".format(save_model_path))
@@ -100,7 +100,7 @@ def Inference(FLAGS):
     second_total = 0.0
     third_total = 0.0
     for case in tqdm(image_list):
-        first_metric, second_metric, third_metric = test_single_volume(case, net, test_save_path, FLAGS)
+        first_metric, second_metric, third_metric = test_single_volume(case, net, test_save_path, args)
         first_total += np.asarray(first_metric)
         second_total += np.asarray(second_metric)
         third_total += np.asarray(third_metric)
@@ -109,8 +109,8 @@ def Inference(FLAGS):
 
 
 if __name__ == '__main__':
-    FLAGS = parser.parse_args()
-    metric, test_save_path = Inference(FLAGS)
+    args = parser.parse_args()
+    metric, test_save_path = Inference(args)
     print(metric)
     print((metric[0]+metric[1]+metric[2])/3)
     with open(test_save_path+'../performance.txt', 'w') as f:

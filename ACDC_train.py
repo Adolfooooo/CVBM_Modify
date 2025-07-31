@@ -25,7 +25,7 @@ from utils import losses, ramps, feature_memory, contrastive_losses, val_2d
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default="/root/ACDC", help='Name of Experiment')
-parser.add_argument('--exp', type=str, default='CVBM2d', help='experiment_name')
+parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
@@ -45,6 +45,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM/1', help='snapshot path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -555,8 +556,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(args.seed)
 
     # -- path to save models
-    pre_snapshot_path = "./results/CVBM/1/ACDC_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM/1/ACDC_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
+    self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
@@ -567,7 +568,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,

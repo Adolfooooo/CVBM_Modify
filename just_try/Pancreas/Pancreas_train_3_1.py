@@ -22,7 +22,7 @@ from utils import losses, ramps, test_3d_patch
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_Pancreas', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
@@ -30,7 +30,7 @@ parser.add_argument('--max_samples', type=int, default=62, help='maximum samples
 parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
 parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
-parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
+parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=6, help='trained samples')
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
@@ -44,6 +44,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_3_1/1', help='snapshot path')
 args = parser.parse_args()
 
 
@@ -457,21 +458,21 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "./results/CVBM/test/Pancreas_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM/test/Pancreas_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
+    self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
-    shutil.copy('./Pancreas_train-copy.py', self_snapshot_path)
+    shutil.copy('./just_try/Pancreas/Pancreas_train_3_1.py', self_snapshot_path)
     # -- Pre-Training
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
