@@ -216,7 +216,7 @@ def mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=Fal
 
 
 def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
-    CE = CrossEntropyLoss
+    # CE = CrossEntropyLoss
     img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
     output_soft = F.softmax(output, dim=1)
     image_weight, patch_weight = l_weight, u_weight
@@ -463,15 +463,15 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 # plab_b = get_ACDC_masks(pre_b, nms=1)
                 plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
                 plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
-                plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
-                plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
+                # plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
+                # plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
 
                 pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s)
                 pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s)
-                plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
-                plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
-                plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
-                plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
+                # plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
+                # plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
+                # plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
+                # plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
                 plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
                 plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
@@ -498,19 +498,19 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
-            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg, lab_a_bg, onehot_mask,
+            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg_s, lab_a_bg_s, onehot_mask,
                                                         u_weight=args.u_weight, unlab=True)
-            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg, plab_b_bg, onehot_mask, u_weight=args.u_weight)
+            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
 
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
             ### Bidirectional Consistency Loss
             # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
 
-            loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), 1 - F.softmax((out_l_bg), dim=1))
+            loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), F.softmax((1 - out_l_bg), dim=1))
                                 +consistency_criterion(F.softmax(out_l, dim=1), F.softmax((out_l_fg), dim=1))
                                 )
-            loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), 1 - F.softmax((out_unl_bg), dim=1))
+            loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), F.softmax((1 - out_unl_bg), dim=1))
                                 +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
                                 )
             loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)

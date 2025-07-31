@@ -157,7 +157,11 @@ def update_model_ema(model, ema_model, alpha):
         new_dict[key] = alpha * model_ema_state[key] + (1 - alpha) * model_state[key]
     ema_model.load_state_dict(new_dict)
 
-
+#
+# 这一矩形区域被置为 0，表示“无效区域”或“被遮挡区域”：
+# mask: 用于引导标签混合（如：在哪儿使用伪标签、在哪儿用真标签）
+# loss_mask: 在损失计算时忽略该区域（例如，不计算交叉熵）
+# onehot_mask: 用于掩盖 one-hot 标签的计算
 def generate_mask(img, number_class):
     batch_size, channel, img_x, img_y = img.shape[0], img.shape[1], img.shape[2], img.shape[3]
     loss_mask = torch.ones(batch_size, img_x, img_y).cuda()
@@ -214,7 +218,7 @@ def mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=Fal
 
 
 def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
-    CE = CrossEntropyLoss
+    # CE = CrossEntropyLoss
     img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
     output_soft = F.softmax(output, dim=1)
     image_weight, patch_weight = l_weight, u_weight
@@ -227,6 +231,7 @@ def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, un
     loss_ce += onehot_ce_loss(output_soft, patch_l, patch_mask) * patch_weight  # loss = loss_ce
 
     return loss_dice, loss_ce
+
 
 ### provide for label data to get sclice num
 def patients_to_slices(dataset, patiens_num):
