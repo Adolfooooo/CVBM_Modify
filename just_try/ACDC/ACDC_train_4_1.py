@@ -337,7 +337,7 @@ def pre_train(args, snapshot_path):
                 model.eval()
                 metric_list = 0.0
                 for _, sampled_batch in enumerate(valloader):
-                    metric_i = val_2d.test_single_volume(sampled_batch["image"], sampled_batch["label"], model,
+                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
                                                          classes=num_classes)
                     metric_list += np.array(metric_i)
                 metric_list = metric_list / len(db_val)
@@ -375,8 +375,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
 
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train_4_1")
-    # model = CVBM_Argument(n_channels=in_chns, n_classes=class_num, normalization='instancenorm', has_dropout=True).cuda()
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
     ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     for param in ema_model.parameters():
         param.detach_()  # ema_model set
@@ -457,8 +456,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                                                                             labeled_sub_bs:args.labeled_bs] == 0
             
             with torch.no_grad():
-                pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a)
-                pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b)
+                pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a, uimg_a)
+                pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b, uimg_b)
                 # plab_a = get_ACDC_masks(pre_a, nms=1)
                 # plab_b = get_ACDC_masks(pre_b, nms=1)
                 plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
@@ -466,14 +465,15 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 # plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
                 # plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
 
-                pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s)
-                pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s)
+                pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s, uimg_a_s)
+                pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s, uimg_b_s)
                 # plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
                 # plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
                 # plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
                 # plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
                 plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
                 plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
+                
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
                 l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
@@ -573,7 +573,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 model.eval()
                 metric_list = 0.0
                 for _, sampled_batch in enumerate(valloader):
-                    metric_i = val_2d.test_single_image_CVBM_Argument(sampled_batch["image"], sampled_batch["label"], model,
+                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
                                                          classes=num_classes)
                     metric_list += np.array(metric_i)
                 metric_list = metric_list / len(db_val)

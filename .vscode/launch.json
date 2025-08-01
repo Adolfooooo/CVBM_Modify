@@ -9,8 +9,8 @@
             "type": "debugpy",
             "request": "attach",
             "connect": {
-                "host": "i-1.gpushare.com",
-                "port": 33876
+                "host": "connect.bjb1.seetacloud.com",
+                "port": 29469
             },
             "pathMappings": [
                 {
