@@ -525,7 +525,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
             total_patch = patches_outputs_1.shape[1]
             patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1, largest=False)
-
+            
             bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
 
             loss =loss_dice + loss_ce + consistency_weight * bclloss
