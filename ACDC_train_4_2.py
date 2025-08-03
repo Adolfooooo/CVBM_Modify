@@ -19,6 +19,7 @@ from torch.nn.modules.loss import CrossEntropyLoss
 from torchvision import transforms
 from tqdm import tqdm
 from skimage.measure import label
+from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
@@ -26,7 +27,7 @@ from utils import losses, ramps, feature_memory, contrastive_losses, val_2d
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
@@ -407,6 +408,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
+    BCLLoss = losses.BlockContrastiveLoss()
     load_net(ema_model, pre_trained_model)
     load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
@@ -516,14 +518,17 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), F.softmax((1 - out_unl_bg), dim=1))
             #                     +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
             #                     )
+            topnum=16
             out_soft_mix = F.softmax(output_mix, dim=1)
             score = torch.max(out_soft_mix, dim=1)[0]
-            
+            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
+            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
+            total_patch = patches_outputs_1.shape[1]
+            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1, largest=False)
 
+            bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
 
-            
-            
-            loss =loss_dice + loss_ce
+            loss =loss_dice + loss_ce + bclloss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
 
@@ -644,4 +649,4 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # self_train(args, pre_snapshot_path, self_snapshot_path)
+    self_train(args, pre_snapshot_path, self_snapshot_path)

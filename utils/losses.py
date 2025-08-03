@@ -860,3 +860,95 @@ class BinaryTverskyLoss3D(nn.Module):
         
         # 返回平均loss
         return (1 - tversky).mean()
+
+
+class BlockContrastiveLoss(nn.Module):
+    def __init__(self, temperature=0.5):
+        super(BlockContrastiveLoss, self).__init__()
+        self.temperature = temperature
+        
+    def forward(self, blocks_A, blocks_B):
+        """
+        完全按照图中公式实现的块对比损失
+        
+        Args:
+            blocks_A: [num_blocks_A, feature_dim] - 块A的特征表示
+            blocks_B: [num_blocks_B, feature_dim] - 块B的特征表示
+        """
+        device = blocks_A.device
+        
+        # 归一化特征
+        blocks_A = F.normalize(blocks_A, p=2, dim=1)
+        blocks_B = F.normalize(blocks_B, p=2, dim=1)
+        
+        # 计算块A与块B之间的相似度矩阵
+        sim_matrix = torch.mm(blocks_A, blocks_B.t()) / self.temperature
+        
+        # 按照图中公式：分子是 exp(1/τ)
+        # 注意：这里的1是常数1，不是1.0
+        numerator = torch.exp(torch.tensor(1.0, device=device) / self.temperature)
+        
+        # 对块A中的每个块计算损失
+        total_loss = 0.0
+        num_blocks_A = blocks_A.size(0)
+        
+        for i in range(num_blocks_A):
+            # 当前块A_i与所有块B的相似度
+            similarities = sim_matrix[i]  # [num_blocks_B]
+            
+            # 分母：所有负样本对的exp相似度之和
+            denominator = torch.sum(torch.exp(similarities/self.temperature))
+            
+            # 按照图中公式计算损失
+            loss_i = -torch.log(numerator / denominator)
+            total_loss += loss_i
+        
+        return total_loss / num_blocks_A
+
+class BlockContrastiveLossVectorized(nn.Module):
+    def __init__(self, temperature=0.5):
+        super(BlockContrastiveLossVectorized, self).__init__()
+        self.temperature = temperature
+        
+    def forward(self, blocks_A, blocks_B):
+        """
+        向量化版本，严格按照图中公式
+        """
+        device = blocks_A.device
+        
+        # 归一化特征
+        blocks_A = F.normalize(blocks_A, p=2, dim=1)
+        blocks_B = F.normalize(blocks_B, p=2, dim=1)
+        
+        # 计算相似度矩阵并应用温度
+        sim_matrix = torch.mm(blocks_A, blocks_B.t()) / self.temperature
+        
+        # 分子：exp(1/τ) - 按照图中公式
+        numerator = torch.exp(torch.tensor(1.0, device=device) / self.temperature)
+        
+        # 分母：每个块A与所有块B的相似度之和
+        denominators = torch.sum(torch.exp(sim_matrix), dim=1)  # [num_blocks_A]
+        
+        # 计算损失：-log(numerator / denominator)
+        losses = -torch.log(numerator / denominators)
+        
+        return torch.mean(losses)
+
+# 测试验证
+def test_formula_consistency():
+    """测试公式的一致性"""
+    temperature = 0.5
+    
+    # 方法1：直接计算 exp(1/τ)
+    numerator1 = torch.exp(torch.tensor(1.0) / temperature)
+    
+    # 方法2：计算 exp(1.0/τ)  
+    numerator2 = torch.exp(torch.tensor(1.0) / temperature)
+    
+    # 方法3：如果图中是 exp(1/τ) 其中1是整数
+    numerator3 = torch.exp(torch.tensor(1) / temperature)
+    
+    print(f"exp(1.0/τ): {numerator1.item():.6f}")
+    print(f"exp(1.0/τ): {numerator2.item():.6f}") 
+    print(f"exp(1/τ):   {numerator3.item():.6f}")
+    print(f"Are they equal? {torch.allclose(numerator1, numerator3)}")
