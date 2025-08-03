@@ -222,3 +222,12 @@ def compute_sdf_bg(img_gt, out_shape):
             # assert np.max(sdf) ==  1.0, print(np.min(posdis), np.min(negdis), np.max(posdis), np.max(negdis))
 
     return normalized_sdf
+
+
+def one_hot_encoder(self, input_tensor):
+    tensor_list = []
+    for i in range(self.n_classes):
+        temp_prob = input_tensor == i * torch.ones_like(input_tensor)
+        tensor_list.append(temp_prob)
+    output_tensor = torch.cat(tensor_list, dim=1)
+    return output_tensor.float()

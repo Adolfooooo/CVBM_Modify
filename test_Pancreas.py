@@ -7,10 +7,10 @@ from networks.net_factory import net_factory
 from utils.test_3d_patch import test_all_case
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/NIH-Pancreas/Pancreas', help='Name of Experiment')
 parser.add_argument('--exp', type=str,  default='CVBM_Pancreas', help='exp_name')
 parser.add_argument('--model', type=str,  default='CVBM', help='model_name')
-parser.add_argument('--gpu', type=str,  default='0', help='GPU to use')
+parser.add_argument('--gpu', type=str,  default='1', help='GPU to use')
 parser.add_argument('--detail', type=int,  default=1, help='print metrics for every samples?')
 parser.add_argument('--nms', type=int, default=1, help='apply NMS post-procssing?')
 parser.add_argument('--labelnum', type=int, default=6, help='labeled data')

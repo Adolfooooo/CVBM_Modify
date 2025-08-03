@@ -4,31 +4,34 @@ from tensorboardX import SummaryWriter
 import shutil
 import argparse
 import logging
+
 import torch.optim as optim
 from torchvision import transforms
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
-from skimage.measure import label
 from torch.utils.data import DataLoader
-from utils import losses, ramps, test_3d_patch
+from skimage.measure import label
+
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
 from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables, context_mask_pancreas
+from utils import losses, ramps, test_3d_patch
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/NIH-Pancreas/Pancreas', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM_Pancreas', help='exp_name')
-parser.add_argument('--model', type=str, default='CVBM', help='model_name')
+parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
 parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
 parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
 parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
-parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
-parser.add_argument('--labelnum', type=int, default=6, help='trained samples')
+parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
+parser.add_argument('--labelnum', type=int, default=12, help='trained samples')
 parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
@@ -41,7 +44,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM/1', help='snapshot path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_1/1', help='snapshot path')
 args = parser.parse_args()
 
 
@@ -136,9 +139,11 @@ def pre_train(args, snapshot_path):
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     DICE = losses.mask_DiceLoss(nclass=2)
     consistency_criterion = losses.mse_loss
+
     # xuhao modify
     focal_loss = losses.FocalLoss(alpha=2.0, gamma=2.0)
     binary_tversky_loss = losses.BinaryTverskyLoss3D(alpha=0.7, beta=0.3)
+
     model.train()
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("{} itertations per epoch".format(len(trainloader)))
@@ -150,7 +155,7 @@ def pre_train(args, snapshot_path):
         for _, sampled_batch in enumerate(trainloader):
             volume_batch, label_batch = sampled_batch['image'][:args.labeled_bs], sampled_batch['label'][
                                                                                   :args.labeled_bs]
-            
+            # volume_batch, label_batch: ([2, 1, 96, 96, 96], [2, 96, 96, 96])
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:]
@@ -165,25 +170,24 @@ def pre_train(args, snapshot_path):
             loss_seg = 0
             loss_seg_dice = 0
             loss_sdf = 0
-
+            
             y2 = outputs_fg[:args.labeled_bs, ...]
-            # y_prob2 = F.softmax(y2, dim=1)
+            y_prob2 = F.softmax(y2, dim=1)
             # loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
             # loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
 
-            y_bg = outputs_bg[:args.labeled_bs, ...]
-            # y_prob_bg = F.softmax(y_bg, dim=1)
-            # loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-            # loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
             loss_seg += focal_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
             loss_seg_dice += binary_tversky_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
 
             y_bg = outputs_bg[:args.labeled_bs, ...]
             loss_seg += focal_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
             loss_seg_dice += binary_tversky_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-
+            # y_prob_bg = F.softmax(y_bg, dim=1)
+            # loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            # loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
             loss = (loss_seg + loss_seg_dice) / 2
-
+            # logging.info("y_prob2: {}, y_prob_bg: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), torch.argmax(y_prob_bg, dim=1).sum(), label_batch.sum()))
+            logging.info("y_prob2: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), label_batch.sum()))
             iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
@@ -216,6 +220,7 @@ def pre_train(args, snapshot_path):
                 break
 
         if iter_num >= pre_max_iterations:
+            # save_net_opt(model, optimizer, os.path.join(snapshot_path, 'iter_{}_dice.pth'.format(iter_num)))
             iterator.close()
             break
     writer.close()
@@ -229,8 +234,9 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     db_train = Pancreas(base_dir=train_data_path,
                         split='train',
                         transform=transforms.Compose([
+                            # RandomCrop(patch_size),
                             RandomCrop(patch_size),
-                            ToTensor(),
+                            DualAugmentTransform(), 
                         ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
@@ -247,8 +253,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
     pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
-    load_net(model, pretrained_model)
-    load_net(ema_model, pretrained_model)
+    # load_net(model, pretrained_model)
+    # load_net(ema_model, pretrained_model)
 
     model.train()
     ema_model.train()
@@ -268,6 +274,15 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             lab_a_bg, lab_b_bg = label_batch[:sub_bs] == 0, label_batch[sub_bs:args.labeled_bs] == 0
             unimg_a, unimg_b = volume_batch[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch[
                                                                                        args.labeled_bs + sub_bs:]
+            
+            # strong augmentation
+            volume_batch_strong, label_batch_strong,  = sampled_batch['image_strong'], sampled_batch['label_strong']
+            volume_batch_strong, label_batch_strong,  = volume_batch_strong.cuda(), label_batch_strong.cuda()
+            img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
+            lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
+            lab_a_bg_s, lab_b_bg_s = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0
+            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[
+                                                                                       args.labeled_bs + sub_bs:]
             with torch.no_grad():
                 unoutput_a_fg, unoutput_a, unoutput_a_bg, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a)
                 unoutput_b_fg, unoutput_b, unoutput_b_bg, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b)
@@ -279,15 +294,27 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 plab_b_bg = get_cut_mask(unoutput_b_bg, nms=1)
                 img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
 
+                # strong augmentation
+                unoutput_a_fg_s,unoutput_a_s, unoutput_a_bg_s, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a_s)
+                unoutput_b_fg_s,unoutput_b_s, unoutput_b_bg_s, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b_s)
+                # plab_a_s = get_cut_mask(unoutput_a_s, nms=1)
+                # plab_b_s = get_cut_mask(unoutput_b_s, nms=1)
+                plab_a_fg_s = get_cut_mask(unoutput_a_fg_s, nms=1)
+                plab_b_fg_s = get_cut_mask(unoutput_b_fg_s, nms=1)
+                plab_a_bg_s = get_cut_mask(unoutput_a_bg_s, nms=1)
+                plab_b_bg_s = get_cut_mask(unoutput_b_bg_s, nms=1)
+
+
             mixl_img = img_a * img_mask + unimg_a * (1 - img_mask)
             mixu_img = unimg_b * img_mask + img_b * (1 - img_mask)
+
             ####
             mixl_lab = lab_a * img_mask + plab_a * (1 - img_mask)
             mixu_lab = plab_b * img_mask + lab_b * (1 - img_mask)
-            mixl_lab_bg = lab_a_bg * img_mask + plab_a_bg * (1 - img_mask)
-            mixu_lab_bg = plab_b_bg * img_mask + lab_b_bg * (1 - img_mask)
+            # mixl_lab_bg = lab_a_bg * img_mask + plab_a_bg * (1 - img_mask)
+            # mixu_lab_bg = plab_b_bg * img_mask + lab_b_bg * (1 - img_mask)
             ####
-            outputs_l_fg, outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img)
+            outputs_l_fg, outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg = model(net_input_unl, net_input_unl_s)
             outputs_u_fg, outputs_u, outputs_u_bg, sdm_outputs_u, sdm_outputs_u_bg = model(mixu_img)
             loss_l = mix_loss(outputs_l_fg, lab_a, plab_a_fg, loss_mask, u_weight=args.u_weight)
             loss_u = mix_loss(outputs_u_fg, plab_b_fg, lab_b, loss_mask, u_weight=args.u_weight, unlab=True)
@@ -303,7 +330,28 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                     + consistency_criterion(F.softmax(outputs_u, dim=1), F.softmax((outputs_u_fg), dim=1))
             )
             consistency_weight = get_current_consistency_weight(iter_num // 150)
-            loss = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * (loss_consist_l + loss_consist_u)
+            loss_origin = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * (loss_consist_l + loss_consist_u)
+
+             # strong augmentation
+            mixl_img_s = img_a_s * img_mask + unimg_a_s * (1 - img_mask)
+            mixu_img_s = unimg_b_s * img_mask + img_b_s * (1 - img_mask)
+            ####
+            outputs_l_fg_s, outputs_l_s, outputs_l_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img_s)
+            outputs_u_fg_s, outputs_u_s, outputs_u_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixu_img_s)
+            loss_l_s = mix_loss(outputs_l_fg_s, lab_a_s, plab_a_fg_s, loss_mask, u_weight=args.u_weight)
+            loss_u_s = mix_loss(outputs_u_fg_s, plab_b_fg_s, lab_b_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            loss_l_bg_s = mix_loss(outputs_l_bg_s, lab_a_bg_s, plab_a_bg_s, loss_mask, u_weight=args.u_weight)
+            loss_u_bg_s = mix_loss(outputs_u_bg_s, plab_b_bg_s, lab_b_bg_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            ### Bidirectional Consistency Loss
+            loss_consist_l_s = (consistency_criterion(F.softmax(outputs_l_fg_s, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
+                              +consistency_criterion(F.softmax(outputs_l_s, dim=1), F.softmax((outputs_l_fg_s), dim=1))
+                              )
+            loss_consist_u_s = (consistency_criterion(F.softmax(outputs_u_fg_s, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
+                              +consistency_criterion(F.softmax(outputs_u_s, dim=1), F.softmax((outputs_u_fg_s), dim=1))
+                              )
+            loss_s = loss_l_s + loss_u_s + loss_l_bg_s + loss_u_bg_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
+
+            loss = loss_origin + loss_s
 
             iter_num += 1
             writer.add_scalar('Self/consistency', consistency_weight, iter_num)
@@ -418,7 +466,7 @@ if __name__ == "__main__":
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
-    shutil.copy('./Pancreas_train.py', self_snapshot_path)
+    shutil.copy('./just_try/Pancreas/Pancreas_train_3_1.py', self_snapshot_path)
     # -- Pre-Training
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
