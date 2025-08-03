@@ -19,6 +19,7 @@ from torch.nn.modules.loss import CrossEntropyLoss
 from torchvision import transforms
 from tqdm import tqdm
 from skimage.measure import label
+from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
@@ -47,7 +48,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_1/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -407,6 +408,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
+    BCLLoss = losses.BlockContrastiveLoss()
     load_net(ema_model, pre_trained_model)
     load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
@@ -516,14 +518,17 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), F.softmax((1 - out_unl_bg), dim=1))
             #                     +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
             #                     )
+            topnum=16
             out_soft_mix = F.softmax(output_mix, dim=1)
             score = torch.max(out_soft_mix, dim=1)[0]
-            
+            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
+            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
+            total_patch = patches_outputs_1.shape[1]
+            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1, largest=False)
 
+            bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
 
-            
-            
-            loss =loss_dice + loss_ce
+            loss =loss_dice + loss_ce + consistency_weight * bclloss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
 
