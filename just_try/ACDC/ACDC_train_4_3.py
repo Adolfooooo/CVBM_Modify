@@ -460,19 +460,11 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a, uimg_a)
                 pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b, uimg_b)
-                # plab_a = get_ACDC_masks(pre_a, nms=1)
-                # plab_b = get_ACDC_masks(pre_b, nms=1)
                 plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
                 plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
-                # plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
-                # plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
 
                 pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s, uimg_a_s)
                 pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s, uimg_b_s)
-                # plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
-                # plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
-                # plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
-                # plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
                 plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
                 plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
                 
@@ -482,9 +474,9 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             consistency_weight = get_current_consistency_weight(iter_num // 150)
             # net_input_unl, net_input_l
             # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
-            net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
-            net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
-            net_input = torch.cat([net_input_unl, net_input_l], dim=0)
+            # net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
+            # net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
+            net_input_u = torch.cat([uimg_a, uimg_b], dim=0)
 
             net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
             net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
