@@ -417,9 +417,6 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     logging.info("Start self_training")
     logging.info("{} iterations per epoch".format(len(trainloader)))
 
-    model.train()
-    ema_model.train()
-
     ce_loss = CrossEntropyLoss()
 
     iter_num = 0
@@ -429,6 +426,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     iterator = tqdm(range(max_epoch), ncols=70)
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
+            model.train()
+            ema_model.train()
             # volume_batch.shape, label_batch.shape, onehot_label_batch.shape
             # torch.Size([24, 1, 256, 256]) torch.Size([24, 256, 256]) torch.Size([24, 4, 256, 256])
             volume_batch, label_batch, onehot_label_batch = sampled_batch['image'], sampled_batch['label'], \
@@ -588,17 +587,24 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
+                ema_model.eval()
                 metric_list = 0.0
+                ema_metric_list = 0.0
                 for _, sampled_batch in enumerate(valloader):
                     metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
                                                          classes=num_classes)
+                    ema_metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], ema_model,
+                                                         classes=num_classes)
                     metric_list += np.array(metric_i)
+                    ema_metric_list += np.array(ema_metric_i)
                 metric_list = metric_list / len(db_val)
                 for class_i in range(num_classes - 1):
                     writer.add_scalar('info/val_{}_dice'.format(class_i + 1), metric_list[class_i, 0], iter_num)
                     writer.add_scalar('info/val_{}_hd95'.format(class_i + 1), metric_list[class_i, 1], iter_num)
 
                 performance = np.mean(metric_list, axis=0)[0]
+                ema_performance = np.mean(ema_metric_list, axis=0)[0]
+                
                 writer.add_scalar('info/val_mean_dice', performance, iter_num)
 
                 if performance > best_performance:
@@ -608,9 +614,16 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                     save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
-
+                if ema_performance > ema_best_performance:
+                    ema_best_performance = ema_performance
+                    ema_save_mode_path = os.path.join(snapshot_path,
+                                                  'iter_ema_{}_dice_{}.pth'.format(iter_num, round(ema_best_performance, 4)))
+                    ema_save_best_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
+                    torch.save(model.state_dict(), ema_save_mode_path)
+                    torch.save(model.state_dict(), ema_save_best_path)
                 logging.info('iteration %d : mean_dice : %f' % (iter_num, performance))
-                model.train()
+                logging.info('iteration %d : mean_dice : %f' % (iter_num, ema_performance))
+                
 
             if iter_num >= max_iterations:
                 break
