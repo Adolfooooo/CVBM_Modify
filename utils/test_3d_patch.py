@@ -196,6 +196,49 @@ def test_all_case(model, image_list, num_classes, patch_size=(112, 112, 80), str
     return avg_metric
 
 
+def test_all_case_argument(model, image_list, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, save_result=True,
+                  test_save_path=None, preproc_fn=None, metric_detail=0, nms=0):
+    loader = tqdm(image_list) if not metric_detail else image_list
+    total_metric = 0.0
+    ith = 0
+    for image_path in loader:
+        # id = image_path.split('/')[-2]
+        h5f = h5py.File(image_path, 'r')
+        image = h5f['image'][:]
+        label = h5f['label'][:]
+        if preproc_fn is not None:
+            image = preproc_fn(image)
+        prediction, score_map = test_single_case_argument(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
+        if nms:
+            prediction = getLargestCC(prediction)
+
+        if np.sum(prediction) == 0:
+            single_metric = (0, 0, 0, 0)
+        else:
+            single_metric = calculate_metric_percase(prediction, label[:])
+
+        if metric_detail:
+            print('%02d,\t%.5f, %.5f, %.5f, %.5f' % (
+                ith, single_metric[0], single_metric[1], single_metric[2], single_metric[3]))
+
+        total_metric += np.asarray(single_metric)
+
+        if save_result:
+            nib.save(nib.Nifti1Image(prediction.astype(np.float32), np.eye(4)),
+                     test_save_path + "%02d_pred.nii.gz" % ith)
+            # nib.save(nib.Nifti1Image(score_map[0].astype(np.float32), np.eye(4)), test_save_path +  "%02d_scores.nii.gz" % ith)
+            nib.save(nib.Nifti1Image(image[:].astype(np.float32), np.eye(4)), test_save_path + "%02d_img.nii.gz" % ith)
+            nib.save(nib.Nifti1Image(label[:].astype(np.float32), np.eye(4)), test_save_path + "%02d_gt.nii.gz" % ith)
+        ith += 1
+
+    avg_metric = total_metric / len(image_list)
+    print('average metric is {}'.format(avg_metric))
+
+    with open(test_save_path + '../performance.txt', 'w') as f:
+        f.writelines('average metric is {} \n'.format(avg_metric))
+    return avg_metric
+
+
 def test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=1):
     w, h, d = image.shape
 

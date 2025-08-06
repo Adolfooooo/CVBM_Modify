@@ -17,6 +17,7 @@ from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from skimage.measure import label
 import numpy as np
+from einops import rearrange
 
 from utils import losses, ramps, test_3d_patch
 # from dataloaders.dataset import *
@@ -49,6 +50,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1/', help='snapshot path to save model')
 args = parser.parse_args()
 
 
@@ -207,7 +209,7 @@ def pre_train(args, snapshot_path):
 
             if iter_num % 200 == 0:
                 model.eval()
-                dice_sample = test_3d_patch.var_all_case_LA(model, num_classes=num_classes, patch_size=patch_size,
+                dice_sample = test_3d_patch.test_single_case_argument(model, num_classes=num_classes, patch_size=patch_size,
                                                             stride_xy=18, stride_z=4, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
@@ -272,10 +274,13 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     writer = SummaryWriter(self_snapshot_path + '/log')
     logging.info("{} itertations per epoch".format(len(trainloader)))
     iter_num = 0
-    best_dice = 0
+    
     max_epoch = self_max_iterations // len(trainloader) + 1
     lr_ = base_lr
     iterator = tqdm(range(max_epoch), ncols=70)
+
+    best_dice = 0
+    ema_best_dice = 0
 
     for epoch in iterator:
         for _, sampled_batch in enumerate(trainloader):
@@ -337,7 +342,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l = mix_loss(outputs_l_fg, lab_a, plab_a_fg, loss_mask, u_weight=args.u_weight)
             loss_u = mix_loss(outputs_u_fg, plab_b_fg, lab_b, loss_mask, u_weight=args.u_weight, unlab=True)
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
-            loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_bg_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
             
             
             ### contrastive loss
@@ -358,16 +363,17 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             writer.add_scalar('Self/consistency', consistency_weight, iter_num)
             writer.add_scalar('Self/loss_l', loss_l, iter_num)
             writer.add_scalar('Self/loss_u', loss_u, iter_num)
-            writer.add_scalar('Self/loss_consist_l', loss_l, iter_num)
-            writer.add_scalar('Self/loss_consist_u', loss_u, iter_num)
+            writer.add_scalar('Self/loss_l_bg', loss_l_bg, iter_num)
+            writer.add_scalar('Self/loss_u_bg', loss_u_bg, iter_num)
+            writer.add_scalar('Self/bclloss', bclloss, iter_num)
             writer.add_scalar('Self/loss_all', loss, iter_num)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             logging.info(
-                'iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_consist_l: %03f, loss_consist_u: %03f' % (
-                iter_num, loss, loss_l, loss_u, loss_consist_l, loss_consist_u))
+                'iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_bcl: %03f' % (
+                iter_num, loss, loss_l, loss_u, bclloss))
 
             update_ema_variables(model, ema_model, 0.99)
 
@@ -382,10 +388,10 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 ema_model.eval()
                 dice_sample = test_3d_patch.var_all_case_LA(model, num_classes=num_classes, patch_size=patch_size,
                                                             stride_xy=18, stride_z=4, dataset_path=args.root_path)
-                dice_sample = test_3d_patch.var_all_case_LA(ema_model, num_classes=num_classes, patch_size=patch_size,
+                ema_dice_sample = test_3d_patch.var_all_case_LA(ema_model, num_classes=num_classes, patch_size=patch_size,
                                                             stride_xy=18, stride_z=4, dataset_path=args.root_path)
                 if dice_sample > best_dice:
-                    best_dice = round(dice_sample, 4)
+                    best_dice = round(dice_sample, 7)
                     save_mode_path = os.path.join(self_snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
                     save_best_path = os.path.join(self_snapshot_path, '{}_best_model.pth'.format(args.model))
                     # save_net_opt(model, optimizer, save_mode_path)
@@ -393,8 +399,17 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
                     logging.info("save best model to {}".format(save_mode_path))
-                writer.add_scalar('4_Var_dice/Dice', dice_sample, iter_num)
-                writer.add_scalar('4_Var_dice/Best_dice', best_dice, iter_num)
+                if ema_dice_sample > ema_best_dice:
+                    ema_best_dice = round(ema_dice_sample, 7)
+                    save_mode_path = os.path.join(self_snapshot_path, 'iter_{}_ema_dice_{}.pth'.format(iter_num, ema_best_dice))
+                    save_ema_best_path = os.path.join(self_snapshot_path, '{}_ema_best_model.pth'.format(args.model))
+                    # save_net_opt(model, optimizer, save_mode_path)
+                    # save_net_opt(model, optimizer, save_best_path)
+                    torch.save(ema_model.state_dict(), save_mode_path)
+                    torch.save(ema_model.state_dict(), save_ema_best_path)
+                    logging.info("save best model to {}".format(save_mode_path))
+                writer.add_scalar('4_Var_dice/Dice', ema_dice_sample, iter_num)
+                writer.add_scalar('4_Var_dice/Best_dice', ema_best_dice, iter_num)
                 model.train()
 
             if iter_num % 200 == 1:
@@ -462,8 +477,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 if __name__ == "__main__":
     ## make logger file
-    pre_snapshot_path = "{}./results/CVBM_LA_train_3_1/2/LA_{}_{}_labeled/pre_train".format(args.exp, args.labelnum)
-    self_snapshot_path = "./results/CVBM_LA_train_3_1/2/LA_{}_{}_labeled/self_train".format(args.exp, args.labelnum)
+    pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
+    self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
     print("Strating BANET training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
