@@ -458,8 +458,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                                                                             labeled_sub_bs:args.labeled_bs] == 0
             
             with torch.no_grad():
-                pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a, uimg_a)
-                pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b, uimg_b)
+                pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
+                pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
                 # plab_a = get_ACDC_masks(pre_a, nms=1)
                 # plab_b = get_ACDC_masks(pre_b, nms=1)
                 plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
@@ -467,8 +467,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 # plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
                 # plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
 
-                pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s, uimg_a_s)
-                pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s, uimg_b_s)
+                # pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s, uimg_a_s)
+                # pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s, uimg_b_s)
                 # plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
                 # plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
                 # plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)

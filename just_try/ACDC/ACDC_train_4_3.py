@@ -48,7 +48,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_3/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -418,7 +418,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
-    ce_loss = CrossEntropyLoss()
+    CE = nn.CrossEntropyLoss(reduction='none')
 
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
@@ -440,58 +440,63 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 volume_batch_strong.cuda(), label_batch_strong.cuda(), onehot_label_batch_strong.cuda()
 
 
-            img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
-            uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
-                                                                                                args.labeled_bs + unlabeled_sub_bs:]
-            ulab_a, ulab_b = label_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch[
-                                                                                                args.labeled_bs + unlabeled_sub_bs:]
-            lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
-            lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
-                                                                            labeled_sub_bs:args.labeled_bs] == 0
+            # img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
+            # uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
+            #                                                                                     args.labeled_bs + unlabeled_sub_bs:]
+            # ulab_a, ulab_b = label_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch[
+            #                                                                                     args.labeled_bs + unlabeled_sub_bs:]
+            # lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
+            # lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
+            #                                                                 labeled_sub_bs:args.labeled_bs] == 0
+            img_l = volume_batch[:args.labeled_bs]
+            img_u = volume_batch[args.labeled_bs:]
+            lab_l = label_batch[:args.labeled_bs]
+            lab_u = label_batch[args.labeled_bs:]
+            lab_bg = onehot_label_batch[:args.labeled_bs] == 0
 
-            img_a_s, img_b_s = volume_batch_strong[:labeled_sub_bs], volume_batch_strong[labeled_sub_bs:args.labeled_bs]
-            uimg_a_s, uimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch_strong[args.labeled_bs + unlabeled_sub_bs:]
-            ulab_a_s, ulab_b_s = label_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch_strong[
-                                                                                                args.labeled_bs + unlabeled_sub_bs:]
-            lab_a_s, lab_b_s = label_batch_strong[:labeled_sub_bs], label_batch_strong[labeled_sub_bs:args.labeled_bs]
-            lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 0, onehot_label_batch_strong[
-                                                                            labeled_sub_bs:args.labeled_bs] == 0
+            # img_a_s, img_b_s = volume_batch_strong[:labeled_sub_bs], volume_batch_strong[labeled_sub_bs:args.labeled_bs]
+            # uimg_a_s, uimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch_strong[args.labeled_bs + unlabeled_sub_bs:]
+            # ulab_a_s, ulab_b_s = label_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch_strong[
+            #                                                                                     args.labeled_bs + unlabeled_sub_bs:]
+            # lab_a_s, lab_b_s = label_batch_strong[:labeled_sub_bs], label_batch_strong[labeled_sub_bs:args.labeled_bs]
+            # lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 0, onehot_label_batch_strong[
+            #                                                                 labeled_sub_bs:args.labeled_bs] == 0
+            img_s_l = volume_batch_strong[:args.labeled_bs]
+            img_s_u = volume_batch_strong[args.labeled_bs:]
+            lab_s_l = label_batch_strong[:args.labeled_bs]
+            lab_s_u = label_batch_strong[args.labeled_bs:]
+            lab_s_bg = onehot_label_batch_strong[:args.labeled_bs] == 0
             
             with torch.no_grad():
-                pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a, uimg_a)
-                pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b, uimg_b)
-                plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
-                plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
-
-                pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s, uimg_a_s)
-                pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s, uimg_b_s)
-                plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
+                # pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a, uimg_a)
+                # pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b, uimg_b)
+                ema_fg, ema_mix, ema_bg, _, _ = ema_model(img_u, img_s_u)
+                pse_lab_fg = get_ACDC_masks(ema_fg, nms=1)
+                pse_lab_bg_s = get_ACDC_masks(ema_bg, nms=1,onehot=True)
                 
-                img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
-                unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
-                l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
+                # img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
+                # unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
+                # l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
             consistency_weight = get_current_consistency_weight(iter_num // 150)
             # net_input_unl, net_input_l
             # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
             # net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
             # net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
-            net_input_u = torch.cat([uimg_a, uimg_b], dim=0)
+            # net_input = torch.cat([net_input_unl, net_input_l], dim=0)
 
-            net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
-            net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
-            net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
+            # net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
+            # net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
+            # net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
 
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
+            # out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
+            out_unl_fg, out_unl, out_unl_bg, _, _ = model(pse_lab_fg, pse_lab_bg_s)
             # out_l_fg,out_l, out_l_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
-
-            # conv 3x3 connect
-            output_mix = torch.cat([out_unl, out_l], dim=0)
-
+            # out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
+            
+            l_dice, l_ce = dice_loss(out_unl_fg, lab_l, lab_s_l, u_weight=args.u_weight, unlab=True), image_weight * (CE(output, img_l) * mask).sum() / (mask.sum() + 1e-16)
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
@@ -641,7 +646,7 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_2.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_4_3.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
