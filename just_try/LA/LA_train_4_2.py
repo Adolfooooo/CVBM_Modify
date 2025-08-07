@@ -27,7 +27,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/LA', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM_LA', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
@@ -345,16 +345,42 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
             
             
-            ### contrastive loss
-            topnum=16
-            out_soft_mix = F.softmax(output_mix_bg_fg, dim=1)
-            score = torch.max(out_soft_mix, dim=1)[0]
-            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
-            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
-            total_patch = patches_outputs_1.shape[1]
-            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1, largest=False)
+            # ### contrastive loss
+            # topnum=16
+            # out_soft_mix = F.softmax(output_mix_bg_fg, dim=1)
+            # score = torch.max(out_soft_mix, dim=1)[0]
+            # patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)d->b (h w) (p1 p2)', p1=4, p2=4)
+            # patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
+            # total_patch = patches_outputs_1.shape[1]
+            # patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1, largest=False)
             
+            # bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
+            ### 3D contrastive loss
+            # 输入: output_mix_bg_fg 形状为 [4, numclasses, 112, 112, 80]
+            topnum = 16
+            # 应用softmax获得概率分布
+            out_soft_mix = F.softmax(output_mix_bg_fg, dim=1)
+            # 取每个位置上所有类别的最大概率值作为置信度分数
+            score = torch.max(out_soft_mix, dim=1)[0]  # 形状: [4, 112, 112, 80]
+            # 将3D特征图重新排列成3D patch
+            # 选择patch大小: 4x4x4 (可以根据需要调整)
+            p1, p2, p3 = 4, 4, 4
+            # 检查维度是否能被patch大小整除
+            H, W, D = score.shape[1], score.shape[2], score.shape[3]
+            assert H % p1 == 0 and W % p2 == 0 and D % p3 == 0, f"Dimensions ({H}, {W}, {D}) must be divisible by patch size ({p1}, {p2}, {p3})"
+            # 重新排列为patch格式
+            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2) (d p3) -> b (h w d) (p1 p2 p3)', 
+                                        p1=p1, p2=p2, p3=p3)
+            # 结果形状: [4, (112/4)*(112/4)*(80/4), 4*4*4] = [4, 28*28*20, 64] = [4, 15680, 64]
+            # 选择top patches (置信度最高的patch)
+            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
+            # 选择剩余的patches (置信度较低的patch)
+            total_patch = patches_outputs_1.shape[1]
+            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(
+                total_patch - topnum, dim=1, largest=False)
+            # 计算BCL loss
             bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
+
 
             loss =loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * bclloss
             
@@ -491,7 +517,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
