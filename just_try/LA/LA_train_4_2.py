@@ -209,7 +209,7 @@ def pre_train(args, snapshot_path):
 
             if iter_num % 200 == 0:
                 model.eval()
-                dice_sample = test_3d_patch.test_single_case_argument(model, num_classes=num_classes, patch_size=patch_size,
+                dice_sample = test_3d_patch.var_all_case_LA_argument(model, num_classes=num_classes, patch_size=patch_size,
                                                             stride_xy=18, stride_z=4, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
@@ -386,9 +386,9 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             if iter_num % 200 == 0:
                 model.eval()
                 ema_model.eval()
-                dice_sample = test_3d_patch.var_all_case_LA(model, num_classes=num_classes, patch_size=patch_size,
+                dice_sample = test_3d_patch.var_all_case_LA_argument(model, num_classes=num_classes, patch_size=patch_size,
                                                             stride_xy=18, stride_z=4, dataset_path=args.root_path)
-                ema_dice_sample = test_3d_patch.var_all_case_LA(ema_model, num_classes=num_classes, patch_size=patch_size,
+                ema_dice_sample = test_3d_patch.var_all_case_LA_argument(ema_model, num_classes=num_classes, patch_size=patch_size,
                                                             stride_xy=18, stride_z=4, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 7)

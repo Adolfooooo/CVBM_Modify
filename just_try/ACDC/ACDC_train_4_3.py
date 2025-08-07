@@ -496,7 +496,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             # out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
             
-            l_dice, l_ce = dice_loss(out_unl_fg, lab_l, lab_s_l, u_weight=args.u_weight, unlab=True), image_weight * (CE(output, img_l) * mask).sum() / (mask.sum() + 1e-16)
+            l_dice, l_ce = dice_loss(out_unl_fg, lab_l, lab_s_l, u_weight=args.u_weight, unlab=True), 1 * (CE(out_unl_fg, img_l)).sum() / (mask.sum() + 1e-16)
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
