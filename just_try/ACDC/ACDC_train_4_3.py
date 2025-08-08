@@ -491,12 +491,17 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             # out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
-            out_unl_fg, out_unl, out_unl_bg, _, _ = model(pse_lab_fg, pse_lab_bg_s)
+            out_l_fg, out_l, out_l_bg, _, _ = model(img_l, img_s_l)
+            out_unl_fg, out_unl, out_unl_bg, _, _ = model(img_u, img_s_u)
             # out_l_fg,out_l, out_l_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             # out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
+
+            out_fg = torch.cat([out_l_fg, out_unl_fg], dim=0)
+            out_bg = torch.cat([out_l_bg, out_unl_bg], dim=0)
             
-            l_dice, l_ce = dice_loss(out_unl_fg, lab_l, lab_s_l, u_weight=args.u_weight, unlab=True), 1 * (CE(out_unl_fg, img_l)).sum() / (mask.sum() + 1e-16)
+            l_dice = dice_loss(out_unl_fg, lab_l, lab_s_l, u_weight=args.u_weight, unlab=True), 
+            l_ce = 1 * (CE(out_unl_fg, img_l)).sum() / (mask.sum() + 1e-16)
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
