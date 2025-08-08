@@ -21,7 +21,7 @@ from utils import losses, ramps, test_3d_patch
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/NIH-Pancreas/Pancreas', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM_Pancreas', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
@@ -32,7 +32,7 @@ parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gp
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=12, help='trained samples')
-parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
@@ -167,38 +167,38 @@ def pre_train(args, snapshot_path):
             label_batch = lab_a * img_mask + lab_b * (1 - img_mask)
 
             outputs_fg, outputs, outputs_bg, out_tanh, out_tanh_bg = model(volume_batch)
-            loss_seg = 0
-            loss_seg_dice = 0
-            loss_sdf = 0
+            loss_focal = 0
+            loss_binary_tversky = 0
+            # loss_sdf = 0
             
             y2 = outputs_fg[:args.labeled_bs, ...]
             y_prob2 = F.softmax(y2, dim=1)
             # loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
             # loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
 
-            loss_seg += focal_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-            loss_seg_dice += binary_tversky_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+            loss_focal += focal_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+            loss_binary_tversky += binary_tversky_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
 
             y_bg = outputs_bg[:args.labeled_bs, ...]
-            loss_seg += focal_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-            loss_seg_dice += binary_tversky_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            loss_focal += focal_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            loss_binary_tversky += binary_tversky_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
             # y_prob_bg = F.softmax(y_bg, dim=1)
             # loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
             # loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
-            loss = (loss_seg + loss_seg_dice) / 2
+            loss = (loss_focal + loss_binary_tversky) / 2
             # logging.info("y_prob2: {}, y_prob_bg: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), torch.argmax(y_prob_bg, dim=1).sum(), label_batch.sum()))
             logging.info("y_prob2: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), label_batch.sum()))
             iter_num += 1
-            writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
-            writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
+            writer.add_scalar('pre/loss_focal', loss_focal, iter_num)
+            writer.add_scalar('pre/loss_binary_tversky', loss_binary_tversky, iter_num)
             # writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f,loss_sdf: %03f' % (
-                iter_num, loss, loss_seg_dice, loss_seg, loss_sdf))
+            logging.info('iteration %d : loss: %03f, loss_focal: %03f, loss_binary_tversky: %03f' % (
+                iter_num, loss, loss_focal, loss_binary_tversky))
             if iter_num % 200 == 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas(model, num_classes=num_classes, patch_size=patch_size,

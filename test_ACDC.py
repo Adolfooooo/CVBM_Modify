@@ -17,7 +17,7 @@ from networks.net_factory import net_factory
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC/', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
-parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
+parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--num_classes', type=int,  default=4, help='output channel of network')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--stage_name', type=str, default='self_train', help='self or pre')
