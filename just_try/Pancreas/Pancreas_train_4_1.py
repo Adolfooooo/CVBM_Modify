@@ -32,7 +32,7 @@ parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gp
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=12, help='trained samples')
-parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
@@ -166,7 +166,7 @@ def pre_train(args, snapshot_path):
             volume_batch = img_a * img_mask + img_b * (1 - img_mask)
             label_batch = lab_a * img_mask + lab_b * (1 - img_mask)
 
-            outputs_fg, outputs, outputs_bg, out_tanh, out_tanh_bg = model(volume_batch)
+            outputs_fg, outputs, outputs_bg, out_tanh, out_tanh_bg = model(volume_batch, volume_batch)
             loss_seg = 0
             loss_seg_dice = 0
             loss_sdf = 0
@@ -201,7 +201,7 @@ def pre_train(args, snapshot_path):
                 iter_num, loss, loss_seg_dice, loss_seg, loss_sdf))
             if iter_num % 200 == 0:
                 model.eval()
-                dice_sample = test_3d_patch.var_all_case_Pancreas(model, num_classes=num_classes, patch_size=patch_size,
+                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(model, num_classes=num_classes, patch_size=patch_size,
                                                                   stride_xy=16, stride_z=16, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
@@ -284,74 +284,74 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[
                                                                                        args.labeled_bs + sub_bs:]
             with torch.no_grad():
-                unoutput_a_fg, unoutput_a, unoutput_a_bg, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a)
-                unoutput_b_fg, unoutput_b, unoutput_b_bg, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b)
+                unoutput_a_fg, unoutput_a, unoutput_a_bg_s, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a, unimg_a_s)
+                unoutput_b_fg, unoutput_b, unoutput_b_bg_s, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b, unimg_b_s)
                 plab_a = get_cut_mask(unoutput_a, nms=1)
                 plab_b = get_cut_mask(unoutput_b, nms=1)
                 plab_a_fg = get_cut_mask(unoutput_a_fg, nms=1)
                 plab_b_fg = get_cut_mask(unoutput_b_fg, nms=1)
-                plab_a_bg = get_cut_mask(unoutput_a_bg, nms=1)
-                plab_b_bg = get_cut_mask(unoutput_b_bg, nms=1)
+                # plab_a_bg = get_cut_mask(unoutput_a_bg, nms=1)
+                # plab_b_bg = get_cut_mask(unoutput_b_bg, nms=1)
                 img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
 
                 # strong augmentation
-                unoutput_a_fg_s,unoutput_a_s, unoutput_a_bg_s, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a_s)
-                unoutput_b_fg_s,unoutput_b_s, unoutput_b_bg_s, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b_s)
+                # unoutput_a_fg_s,unoutput_a_s, unoutput_a_bg_s, unoutput_a_sdm, unsdmput_a_sdm_bg = ema_model(unimg_a_s)
+                # unoutput_b_fg_s,unoutput_b_s, unoutput_b_bg_s, unoutput_b_sdm, unsdmput_b_sdm_bg = ema_model(unimg_b_s)
                 # plab_a_s = get_cut_mask(unoutput_a_s, nms=1)
                 # plab_b_s = get_cut_mask(unoutput_b_s, nms=1)
-                plab_a_fg_s = get_cut_mask(unoutput_a_fg_s, nms=1)
-                plab_b_fg_s = get_cut_mask(unoutput_b_fg_s, nms=1)
+                # plab_a_fg_s = get_cut_mask(unoutput_a_fg_s, nms=1)
+                # plab_b_fg_s = get_cut_mask(unoutput_b_fg_s, nms=1)
                 plab_a_bg_s = get_cut_mask(unoutput_a_bg_s, nms=1)
                 plab_b_bg_s = get_cut_mask(unoutput_b_bg_s, nms=1)
 
 
             mixl_img = img_a * img_mask + unimg_a * (1 - img_mask)
             mixu_img = unimg_b * img_mask + img_b * (1 - img_mask)
-
+            mixl_img_s = img_a_s * img_mask + unimg_a_s * (1 - img_mask)
+            mixu_img_s = unimg_b_s * img_mask + img_b_s * (1 - img_mask)
             ####
             mixl_lab = lab_a * img_mask + plab_a * (1 - img_mask)
             mixu_lab = plab_b * img_mask + lab_b * (1 - img_mask)
             # mixl_lab_bg = lab_a_bg * img_mask + plab_a_bg * (1 - img_mask)
             # mixu_lab_bg = plab_b_bg * img_mask + lab_b_bg * (1 - img_mask)
             ####
-            outputs_l_fg, outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg = model(net_input_unl, net_input_unl_s)
-            outputs_u_fg, outputs_u, outputs_u_bg, sdm_outputs_u, sdm_outputs_u_bg = model(mixu_img)
+            outputs_l_fg, outputs_l, outputs_l_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img, mixl_img_s)
+            outputs_u_fg, outputs_u, outputs_u_bg_s, sdm_outputs_u, sdm_outputs_u_bg = model(mixu_img, mixu_img_s)
             loss_l = mix_loss(outputs_l_fg, lab_a, plab_a_fg, loss_mask, u_weight=args.u_weight)
             loss_u = mix_loss(outputs_u_fg, plab_b_fg, lab_b, loss_mask, u_weight=args.u_weight, unlab=True)
-            loss_l_bg = mix_loss(outputs_l_bg, lab_a_bg, plab_a_bg, loss_mask, u_weight=args.u_weight)
-            loss_u_bg = mix_loss(outputs_u_bg, plab_b_bg, lab_b_bg, loss_mask, u_weight=args.u_weight, unlab=True)
+            loss_l_bg = mix_loss(outputs_l_bg_s, lab_a_bg, plab_a_bg_s, loss_mask, u_weight=args.u_weight)
+            loss_u_bg = mix_loss(outputs_u_bg_s, plab_b_bg_s, lab_b_bg, loss_mask, u_weight=args.u_weight, unlab=True)
             ### Bidirectional Consistency Loss
             loss_consist_l = (
-                    consistency_criterion(F.softmax(outputs_l_fg, dim=1), F.softmax((1 - outputs_l_bg), dim=1))
+                    consistency_criterion(F.softmax(outputs_l_fg, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
                     + consistency_criterion(F.softmax(outputs_l, dim=1), F.softmax((outputs_l_fg), dim=1))
             )
             loss_consist_u = (
-                    consistency_criterion(F.softmax(outputs_u_fg, dim=1), F.softmax((1 - outputs_u_bg), dim=1))
+                    consistency_criterion(F.softmax(outputs_u_fg, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
                     + consistency_criterion(F.softmax(outputs_u, dim=1), F.softmax((outputs_u_fg), dim=1))
             )
             consistency_weight = get_current_consistency_weight(iter_num // 150)
             loss_origin = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * (loss_consist_l + loss_consist_u)
 
              # strong augmentation
-            mixl_img_s = img_a_s * img_mask + unimg_a_s * (1 - img_mask)
-            mixu_img_s = unimg_b_s * img_mask + img_b_s * (1 - img_mask)
-            ####
-            outputs_l_fg_s, outputs_l_s, outputs_l_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img_s)
-            outputs_u_fg_s, outputs_u_s, outputs_u_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixu_img_s)
-            loss_l_s = mix_loss(outputs_l_fg_s, lab_a_s, plab_a_fg_s, loss_mask, u_weight=args.u_weight)
-            loss_u_s = mix_loss(outputs_u_fg_s, plab_b_fg_s, lab_b_s, loss_mask, u_weight=args.u_weight, unlab=True)
-            loss_l_bg_s = mix_loss(outputs_l_bg_s, lab_a_bg_s, plab_a_bg_s, loss_mask, u_weight=args.u_weight)
-            loss_u_bg_s = mix_loss(outputs_u_bg_s, plab_b_bg_s, lab_b_bg_s, loss_mask, u_weight=args.u_weight, unlab=True)
-            ### Bidirectional Consistency Loss
-            loss_consist_l_s = (consistency_criterion(F.softmax(outputs_l_fg_s, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
-                              +consistency_criterion(F.softmax(outputs_l_s, dim=1), F.softmax((outputs_l_fg_s), dim=1))
-                              )
-            loss_consist_u_s = (consistency_criterion(F.softmax(outputs_u_fg_s, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
-                              +consistency_criterion(F.softmax(outputs_u_s, dim=1), F.softmax((outputs_u_fg_s), dim=1))
-                              )
-            loss_s = loss_l_s + loss_u_s + loss_l_bg_s + loss_u_bg_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
+            
+            # ####
+            # outputs_l_fg_s, outputs_l_s, outputs_l_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixl_img_s)
+            # outputs_u_fg_s, outputs_u_s, outputs_u_bg_s, sdm_outputs_l, sdm_outputs_l_bg = model(mixu_img_s)
+            # loss_l_s = mix_loss(outputs_l_fg_s, lab_a_s, plab_a_fg_s, loss_mask, u_weight=args.u_weight)
+            # loss_u_s = mix_loss(outputs_u_fg_s, plab_b_fg_s, lab_b_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            # loss_l_bg_s = mix_loss(outputs_l_bg_s, lab_a_bg_s, plab_a_bg_s, loss_mask, u_weight=args.u_weight)
+            # loss_u_bg_s = mix_loss(outputs_u_bg_s, plab_b_bg_s, lab_b_bg_s, loss_mask, u_weight=args.u_weight, unlab=True)
+            # ### Bidirectional Consistency Loss
+            # loss_consist_l_s = (consistency_criterion(F.softmax(outputs_l_fg_s, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
+            #                   +consistency_criterion(F.softmax(outputs_l_s, dim=1), F.softmax((outputs_l_fg_s), dim=1))
+            #                   )
+            # loss_consist_u_s = (consistency_criterion(F.softmax(outputs_u_fg_s, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
+            #                   +consistency_criterion(F.softmax(outputs_u_s, dim=1), F.softmax((outputs_u_fg_s), dim=1))
+            #                   )
+            # loss_s = loss_l_s + loss_u_s + loss_l_bg_s + loss_u_bg_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
 
-            loss = loss_origin + loss_s
+            loss = loss_origin
 
             iter_num += 1
             writer.add_scalar('Self/consistency', consistency_weight, iter_num)
@@ -378,7 +378,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
             if iter_num % 200 == 0:
                 model.eval()
-                dice_sample = test_3d_patch.var_all_case_Pancreas(model, num_classes=num_classes, patch_size=patch_size,
+                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(model, num_classes=num_classes, patch_size=patch_size,
                                                                   stride_xy=16, stride_z=16, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
@@ -466,7 +466,7 @@ if __name__ == "__main__":
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
-    shutil.copy('./just_try/Pancreas/Pancreas_train_3_1.py', self_snapshot_path)
+    shutil.copy('./just_try/Pancreas/Pancreas_train_4_1.py', self_snapshot_path)
     # -- Pre-Training
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')

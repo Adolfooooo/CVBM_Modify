@@ -111,6 +111,28 @@ def var_all_case_Pancreas(model, num_classes, patch_size=(96, 96, 96), stride_xy
     print('average metric is {}'.format(avg_dice))
     return avg_dice
 
+def var_all_case_Pancreas_argument(model, num_classes, patch_size=(96, 96, 96), stride_xy=16, stride_z=16, dataset_path=None):
+    # dataset_path = '/root/Pancreas'
+    assert type(dataset_path) is str
+    with open(dataset_path + '/test.list', 'r') as f:
+        image_list = f.readlines()
+    image_list = [dataset_path + '/Pancreas_h5/' + item.replace('\n', '') + "_norm.h5" for item in image_list]
+    loader = tqdm(image_list)
+    total_dice = 0.0
+    for image_path in loader:
+        h5f = h5py.File(image_path, 'r')
+        image = h5f['image'][:]
+        label = h5f['label'][:]
+        prediction, score_map = test_single_case_argument(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
+        if np.sum(prediction) == 0:
+            dice = 0
+        else:
+            dice = metric.binary.dc(prediction, label)
+        total_dice += dice
+    avg_dice = total_dice / len(image_list)
+    print('average metric is {}'.format(avg_dice))
+    return avg_dice
+
 def var_all_case_BTCV(model, num_classes, patch_size=(96, 96, 96), stride_xy=16, stride_z=16):
     with open('/root/BTCV/test.list', 'r') as f:
         image_list = f.readlines()
