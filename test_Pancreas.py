@@ -10,7 +10,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/Pancreas', help='Name of Experiment')
 parser.add_argument('--exp', type=str,  default='CVBM_Pancreas', help='exp_name')
 parser.add_argument('--model', type=str,  default='CVBM', help='model_name')
-parser.add_argument('--gpu', type=str,  default='1', help='GPU to use')
 parser.add_argument('--detail', type=int,  default=1, help='print metrics for every samples?')
 parser.add_argument('--nms', type=int, default=1, help='apply NMS post-procssing?')
 parser.add_argument('--labelnum', type=int, default=6, help='labeled data')
@@ -19,7 +18,6 @@ parser.add_argument('--snapshot_path', type=str, default='./results/CVBM/1', hel
 
 args = parser.parse_args()
 
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 snapshot_path = "{}/{}_{}_labeled/{}".format(args.snapshot_path, args.exp, args.labelnum, args.stage_name)
 test_save_path = "{}/{}_{}_labeled/{}_predictions/".format(args.snapshot_path, args.exp, args.labelnum, args.model)
 num_classes = 2
