@@ -19,17 +19,15 @@ from torch.nn.modules.loss import CrossEntropyLoss
 from torchvision import transforms
 from tqdm import tqdm
 from skimage.measure import label
-from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d
-from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
-parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
+parser.add_argument('--model', type=str, default='CVBM2d', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
@@ -48,7 +46,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_3/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_3_1/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -217,9 +215,9 @@ def mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=Fal
 
 
 def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
-    # CE = CrossEntropyLoss
+    CE = CrossEntropyLoss
     img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
-    output_soft = F.softmax(output, dim=1) 
+    output_soft = F.softmax(output, dim=1)
     image_weight, patch_weight = l_weight, u_weight
     if unlab:
         image_weight, patch_weight = u_weight, l_weight
@@ -252,9 +250,8 @@ def pre_train(args, snapshot_path):
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
-        
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train_4_1")
-    # model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
+
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -308,7 +305,7 @@ def pre_train(args, snapshot_path):
             onehot_gt_mixl = onehot_lab_a * img_mask + onehot_lab_b * (1 - img_mask)
             # -- original
             net_input = img_a * img_mask + img_b * (1 - img_mask)
-            out_mixl_fg,out_mixl, outputs_mixl_bg, _, _ = model(net_input, net_input)
+            out_mixl_fg,out_mixl, outputs_mixl_bg, _, _ = model(net_input)
             loss_dice, loss_ce = mix_loss(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
             loss_dice_bg, loss_ce_bg = onehot_mix_loss(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
                                                        unlab=True)
@@ -338,7 +335,7 @@ def pre_train(args, snapshot_path):
                 model.eval()
                 metric_list = 0.0
                 for _, sampled_batch in enumerate(valloader):
-                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
+                    metric_i = val_2d.test_single_volume(sampled_batch["image"], sampled_batch["label"], model,
                                                          classes=num_classes)
                     metric_list += np.array(metric_i)
                 metric_list = metric_list / len(db_val)
@@ -376,7 +373,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
 
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     for param in ema_model.parameters():
         param.detach_()  # ema_model set
@@ -407,7 +404,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    
+    consistency_criterion = losses.mse_loss
     load_net(ema_model, pre_trained_model)
     load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
@@ -416,20 +413,18 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     logging.info("Start self_training")
     logging.info("{} iterations per epoch".format(len(trainloader)))
 
-    consistency_criterion = losses.mse_loss
-    BCLLoss = losses.BlockContrastiveLoss()
-    CE = nn.CrossEntropyLoss(reduction='none')
+    model.train()
+    ema_model.train()
+
+    ce_loss = CrossEntropyLoss()
 
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
     best_performance = 0.0
-    ema_best_performance = 0.0
     best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
-            model.train()
-            ema_model.train()
             # volume_batch.shape, label_batch.shape, onehot_label_batch.shape
             # torch.Size([24, 1, 256, 256]) torch.Size([24, 256, 256]) torch.Size([24, 4, 256, 256])
             volume_batch, label_batch, onehot_label_batch = sampled_batch['image'], sampled_batch['label'], \
@@ -441,89 +436,113 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 volume_batch_strong.cuda(), label_batch_strong.cuda(), onehot_label_batch_strong.cuda()
 
 
-            img_l = volume_batch[:args.labeled_bs]
-            img_u = volume_batch[args.labeled_bs:]
-            lab_l = label_batch[:args.labeled_bs]
-            lab_u = label_batch[args.labeled_bs:]
-            lab_bg = onehot_label_batch[:args.labeled_bs] == 0
+            img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
+            uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
+                                                                                                args.labeled_bs + unlabeled_sub_bs:]
+            ulab_a, ulab_b = label_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch[
+                                                                                                args.labeled_bs + unlabeled_sub_bs:]
+            lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
+            lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
+                                                                            labeled_sub_bs:args.labeled_bs] == 0
 
-            img_s_l = volume_batch_strong[:args.labeled_bs]
-            img_s_u = volume_batch_strong[args.labeled_bs:]
-            lab_s_l = label_batch_strong[:args.labeled_bs]
-            lab_s_u = label_batch_strong[args.labeled_bs:]
-            lab_s_l_bg = onehot_label_batch_strong[:args.labeled_bs] == 0
+            img_a_s, img_b_s = volume_batch_strong[:labeled_sub_bs], volume_batch_strong[labeled_sub_bs:args.labeled_bs]
+            uimg_a_s, uimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch_strong[args.labeled_bs + unlabeled_sub_bs:]
+            ulab_a_s, ulab_b_s = label_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch_strong[
+                                                                                                args.labeled_bs + unlabeled_sub_bs:]
+            lab_a_s, lab_b_s = label_batch_strong[:labeled_sub_bs], label_batch_strong[labeled_sub_bs:args.labeled_bs]
+            lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 0, onehot_label_batch_strong[
+                                                                            labeled_sub_bs:args.labeled_bs] == 0
             
             with torch.no_grad():
-                ema_fg, ema_mix, ema_bg, _, _ = ema_model(img_u, img_s_u)
-                pse_lab_fg = get_ACDC_masks(ema_fg, nms=1)
-                pse_lab_bg_s = get_ACDC_masks(ema_bg, nms=1,onehot=True)
-                
+                pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a)
+                pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b)
+                plab_a = get_ACDC_masks(pre_a, nms=1)
+                plab_b = get_ACDC_masks(pre_b, nms=1)
+                plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
+                plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
+                plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
+                plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
+
+                # pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s)
+                # pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s)
+                # plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
+                # plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
+                # plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
+                # plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
+                # plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
+                # plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
+                img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
+                unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
+                l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
             consistency_weight = get_current_consistency_weight(iter_num // 150)
-            out_l_fg, out_l, out_l_bg, _, _ = model(img_l, img_s_l)
-            out_unl_fg, out_unl, out_unl_bg, _, _ = model(img_u, img_s_u)
+            # net_input_unl, net_input_l
+            # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
+            net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
+            net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
+            net_input = torch.cat([net_input_unl, net_input_l], dim=0)
 
-            out_fg = torch.cat([out_l_fg, out_unl_fg], dim=0)
-            out_bg = torch.cat([out_l_bg, out_unl_bg], dim=0)
-            out_mix = torch.cat([out_l, out_unl], dim=0)
-
-            lab_l = lab_l.long()
-            lab_s_l = lab_s_l.long()
-            pse_lab_fg = pse_lab_fg.long()
-            pse_lab_bg_s = pse_lab_bg_s.long()
-
-            l_dice = dice_loss(F.softmax(out_l_fg, dim=1), lab_l.unsqueeze(1))
-            l_ce = CE(out_l_fg, lab_l).sum() / (255*255)
-            unl_dice = dice_loss(F.softmax(out_unl_fg, dim=1), pse_lab_fg.unsqueeze(1))
-            unl_ce = CE(out_unl_fg, pse_lab_fg).sum() / (255*255)
-
-            l_s_dice = onehot_dice_loss(F.softmax(out_l_bg, dim=1), lab_s_l_bg)
-            l_s_ce = onehot_ce_loss(F.softmax(out_l_bg, dim=1), lab_s_l_bg, mask=torch.ones_like(lab_s_l_bg))
-            unl_s_dice = onehot_dice_loss(F.softmax(out_unl_bg, dim=1), pse_lab_bg_s)
-            unl_s_ce = onehot_ce_loss(F.softmax(out_unl_bg, dim=1), pse_lab_bg_s, mask=torch.ones_like(pse_lab_bg_s))
-            
-
-            loss_dice = unl_dice + l_dice + unl_s_dice + l_s_dice
-            loss_ce = unl_ce + l_ce + unl_s_ce + l_s_ce
-            # loss_ce = unl_ce + l_ce
-
-            topnum=16
-            out_soft_mix = F.softmax(out_mix, dim=1)
-            score = torch.max(out_soft_mix, dim=1)[0]
-            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
-            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
-            total_patch = patches_outputs_1.shape[1]
-            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1, largest=False)
-            
-            bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
-
-            loss =loss_dice + loss_ce + consistency_weight * bclloss
-            # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
+            # net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
+            # net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
+            # net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
 
 
-            # # strong
-            # out_unl_fg_s,out_unl_s, out_unl_bg_s, _, _ = model(net_input_unl_s)
-            # out_l_fg_s,out_l_s, out_l_bg_s, _, _ = model(net_input_l_s)
+            # out_unl_fg,out_unl, out_unl_bg
+            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
+            out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl)
+            # out_l_fg,out_l, out_l_bg
+            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
+            out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l)
 
-            # unl_dice_s, unl_ce_s = mix_loss(out_unl_fg_s, plab_a_fg_s, lab_a_s, loss_mask, u_weight=args.u_weight, unlab=True)
-            # l_dice_s, l_ce_s = mix_loss(out_l_fg_s, lab_b_s, plab_b_fg_s, loss_mask, u_weight=args.u_weight)
+            unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
+            l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
-            # unl_dice_bg_s, unl_ce_bg_s = onehot_mix_loss(out_unl_bg_s, plab_a_bg_s, lab_a_bg_s, onehot_mask,
-            #                                             u_weight=args.u_weight, unlab=True)
-            # l_dice_bg_s, l_ce_bg_s = onehot_mix_loss(out_l_bg_s, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
+            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg, lab_a_bg, onehot_mask,
+                                                        u_weight=args.u_weight, unlab=True)
+            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg, plab_b_bg, onehot_mask, u_weight=args.u_weight)
 
-            # loss_ce_s = unl_ce_s + l_ce_s + unl_ce_bg_s+ l_ce_bg_s
-            # loss_dice_s = unl_dice_s + l_dice_s + unl_dice_bg_s + l_dice_bg_s
-            # ### Bidirectional Consistency Loss
-            # # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
-            # loss_consist_l_s = (consistency_criterion(F.softmax(out_l_fg_s, dim=1), 1 - F.softmax((out_l_bg_s), dim=1))
-            #                     +consistency_criterion(F.softmax(out_l_s, dim=1), F.softmax((out_l_fg_s), dim=1))
-            #                     )
-            # loss_consist_u_s = (consistency_criterion(F.softmax(out_unl_fg_s, dim=1), 1 - F.softmax((out_unl_bg_s), dim=1))
-            #                     +consistency_criterion(F.softmax(out_unl_s, dim=1), F.softmax((out_unl_fg_s), dim=1))
-            #                     )
-            # loss_s =loss_dice_s + loss_ce_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
+            loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
+            loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
+            ### Bidirectional Consistency Loss
+            # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
 
-            # loss = loss + loss_s
+            loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), 1 - F.softmax((out_l_bg), dim=1))
+                                +consistency_criterion(F.softmax(out_l, dim=1), F.softmax((out_l_fg), dim=1))
+                                )
+            loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), 1 - F.softmax((out_unl_bg), dim=1))
+                                +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
+                                )
+            loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
+
+
+            # again
+            # out_unl_fg,out_unl, out_unl_bg
+            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
+            out_unl_fg_two,out_unl_two, out_unl_bg_two, _, _ = model(net_input_unl)
+            # out_l_fg,out_l, out_l_bg
+            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
+            out_l_fg_two,out_l_two, out_l_bg_two, _, _ = model(net_input_l)
+
+            unl_dice_two, unl_ce_two = mix_loss(out_unl_fg_two, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
+            l_dice_two, l_ce_two = mix_loss(out_l_fg_two, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
+
+            unl_dice_bg_two, unl_ce_bg_two = onehot_mix_loss(out_unl_bg_two, plab_a_bg, lab_a_bg, onehot_mask,
+                                                        u_weight=args.u_weight, unlab=True)
+            l_dice_bg_two, l_ce_bg_two = onehot_mix_loss(out_l_bg_two, lab_b_bg, plab_b_bg, onehot_mask, u_weight=args.u_weight)
+
+            loss_ce_two = unl_ce_two + l_ce_two + unl_ce_bg_two+ l_ce_bg_two
+            loss_dice_two = unl_dice_two + l_dice_two + unl_dice_bg_two + l_dice_bg_two
+            ### Bidirectional Consistency Loss
+            # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
+
+            loss_consist_l_two = (consistency_criterion(F.softmax(out_l_fg_two, dim=1), 1 - F.softmax((out_l_bg_two), dim=1))
+                                +consistency_criterion(F.softmax(out_l_two, dim=1), F.softmax((out_l_fg_two), dim=1))
+                                )
+            loss_consist_u_two = (consistency_criterion(F.softmax(out_unl_fg_two, dim=1), 1 - F.softmax((out_unl_bg_two), dim=1))
+                                +consistency_criterion(F.softmax(out_unl_two, dim=1), F.softmax((out_unl_fg_two), dim=1))
+                                )
+            loss_two =loss_dice_two + loss_ce_two + consistency_weight * (loss_consist_l_two + loss_consist_u_two)
+
+            loss = loss + loss_two
 
             optimizer.zero_grad()
             loss.backward()
@@ -539,41 +558,34 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
-            # if iter_num % 20 == 0:
-            #     image = net_input_unl[1, 0:1, :, :]
-            #     writer.add_image('train/Un_Image', image, iter_num)
-            #     outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
-            #     writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
-            #     labs = unl_label[1, ...].unsqueeze(0) * 50
-            #     writer.add_image('train/Un_GroundTruth', labs, iter_num)
+            if iter_num % 20 == 0:
+                image = net_input_unl[1, 0:1, :, :]
+                writer.add_image('train/Un_Image', image, iter_num)
+                outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
+                writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
+                labs = unl_label[1, ...].unsqueeze(0) * 50
+                writer.add_image('train/Un_GroundTruth', labs, iter_num)
 
-            #     image_l = net_input_l[1, 0:1, :, :]
-            #     writer.add_image('train/L_Image', image_l, iter_num)
-            #     outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
-            #     writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
-            #     labs_l = l_label[1, ...].unsqueeze(0) * 50
-            #     writer.add_image('train/L_GroundTruth', labs_l, iter_num)
+                image_l = net_input_l[1, 0:1, :, :]
+                writer.add_image('train/L_Image', image_l, iter_num)
+                outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
+                writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
+                labs_l = l_label[1, ...].unsqueeze(0) * 50
+                writer.add_image('train/L_GroundTruth', labs_l, iter_num)
 
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
-                ema_model.eval()
                 metric_list = 0.0
-                ema_metric_list = 0.0
                 for _, sampled_batch in enumerate(valloader):
-                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
-                                                         classes=num_classes)
-                    ema_metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], ema_model,
+                    metric_i = val_2d.test_single_volume(sampled_batch["image"], sampled_batch["label"], model,
                                                          classes=num_classes)
                     metric_list += np.array(metric_i)
-                    ema_metric_list += np.array(ema_metric_i)
                 metric_list = metric_list / len(db_val)
                 for class_i in range(num_classes - 1):
                     writer.add_scalar('info/val_{}_dice'.format(class_i + 1), metric_list[class_i, 0], iter_num)
                     writer.add_scalar('info/val_{}_hd95'.format(class_i + 1), metric_list[class_i, 1], iter_num)
 
                 performance = np.mean(metric_list, axis=0)[0]
-                ema_performance = np.mean(ema_metric_list, axis=0)[0]
-                
                 writer.add_scalar('info/val_mean_dice', performance, iter_num)
 
                 if performance > best_performance:
@@ -583,16 +595,9 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                     save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
-                if ema_performance > ema_best_performance:
-                    ema_best_performance = ema_performance
-                    ema_save_mode_path = os.path.join(snapshot_path,
-                                                  'iter_ema_{}_dice_{}.pth'.format(iter_num, round(ema_best_performance, 4)))
-                    ema_save_best_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
-                    torch.save(model.state_dict(), ema_save_mode_path)
-                    torch.save(model.state_dict(), ema_save_best_path)
+
                 logging.info('iteration %d : mean_dice : %f' % (iter_num, performance))
-                logging.info('iteration %d : mean_dice : %f' % (iter_num, ema_performance))
-                
+                model.train()
 
             if iter_num >= max_iterations:
                 break
@@ -617,14 +622,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_3.py', self_snapshot_path)
+    shutil.copy('./ACDC_train.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,

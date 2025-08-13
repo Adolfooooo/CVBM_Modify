@@ -219,7 +219,7 @@ def mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=Fal
 def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
     # CE = CrossEntropyLoss
     img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
-    output_soft = F.softmax(output, dim=1)
+    output_soft = F.softmax(output, dim=1) 
     image_weight, patch_weight = l_weight, u_weight
     if unlab:
         image_weight, patch_weight = u_weight, l_weight
@@ -423,6 +423,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
     best_performance = 0.0
+    ema_best_performance = 0.0
     best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
     for _ in iterator:
@@ -440,88 +441,53 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 volume_batch_strong.cuda(), label_batch_strong.cuda(), onehot_label_batch_strong.cuda()
 
 
-            # img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
-            # uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
-            #                                                                                     args.labeled_bs + unlabeled_sub_bs:]
-            # ulab_a, ulab_b = label_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch[
-            #                                                                                     args.labeled_bs + unlabeled_sub_bs:]
-            # lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
-            # lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
-            #                                                                 labeled_sub_bs:args.labeled_bs] == 0
             img_l = volume_batch[:args.labeled_bs]
             img_u = volume_batch[args.labeled_bs:]
             lab_l = label_batch[:args.labeled_bs]
             lab_u = label_batch[args.labeled_bs:]
             lab_bg = onehot_label_batch[:args.labeled_bs] == 0
 
-            # img_a_s, img_b_s = volume_batch_strong[:labeled_sub_bs], volume_batch_strong[labeled_sub_bs:args.labeled_bs]
-            # uimg_a_s, uimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch_strong[args.labeled_bs + unlabeled_sub_bs:]
-            # ulab_a_s, ulab_b_s = label_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch_strong[
-            #                                                                                     args.labeled_bs + unlabeled_sub_bs:]
-            # lab_a_s, lab_b_s = label_batch_strong[:labeled_sub_bs], label_batch_strong[labeled_sub_bs:args.labeled_bs]
-            # lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 0, onehot_label_batch_strong[
-            #                                                                 labeled_sub_bs:args.labeled_bs] == 0
             img_s_l = volume_batch_strong[:args.labeled_bs]
             img_s_u = volume_batch_strong[args.labeled_bs:]
             lab_s_l = label_batch_strong[:args.labeled_bs]
             lab_s_u = label_batch_strong[args.labeled_bs:]
-            lab_s_bg = onehot_label_batch_strong[:args.labeled_bs] == 0
+            lab_s_l_bg = onehot_label_batch_strong[:args.labeled_bs] == 0
             
             with torch.no_grad():
-                # pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a, uimg_a)
-                # pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b, uimg_b)
                 ema_fg, ema_mix, ema_bg, _, _ = ema_model(img_u, img_s_u)
                 pse_lab_fg = get_ACDC_masks(ema_fg, nms=1)
                 pse_lab_bg_s = get_ACDC_masks(ema_bg, nms=1,onehot=True)
                 
-                # img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
-                # unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
-                # l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
             consistency_weight = get_current_consistency_weight(iter_num // 150)
-            # net_input_unl, net_input_l
-            # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
-            # net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
-            # net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
-            # net_input = torch.cat([net_input_unl, net_input_l], dim=0)
-
-            # net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
-            # net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
-            # net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
-
-            # out_unl_fg,out_unl, out_unl_bg
-            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            # out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
             out_l_fg, out_l, out_l_bg, _, _ = model(img_l, img_s_l)
             out_unl_fg, out_unl, out_unl_bg, _, _ = model(img_u, img_s_u)
-            # out_l_fg,out_l, out_l_bg
-            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            # out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
 
             out_fg = torch.cat([out_l_fg, out_unl_fg], dim=0)
             out_bg = torch.cat([out_l_bg, out_unl_bg], dim=0)
+            out_mix = torch.cat([out_l, out_unl], dim=0)
+
+            lab_l = lab_l.long()
+            lab_s_l = lab_s_l.long()
+            pse_lab_fg = pse_lab_fg.long()
+            pse_lab_bg_s = pse_lab_bg_s.long()
+
+            l_dice = dice_loss(F.softmax(out_l_fg, dim=1), lab_l.unsqueeze(1))
+            l_ce = CE(out_l_fg, lab_l).sum() / (255*255)
+            unl_dice = dice_loss(F.softmax(out_unl_fg, dim=1), pse_lab_fg.unsqueeze(1))
+            unl_ce = CE(out_unl_fg, pse_lab_fg).sum() / (255*255)
+
+            l_s_dice = onehot_dice_loss(F.softmax(out_l_bg, dim=1), lab_s_l_bg)
+            l_s_ce = onehot_ce_loss(F.softmax(out_l_bg, dim=1), lab_s_l_bg, mask=torch.ones_like(lab_s_l_bg))
+            unl_s_dice = onehot_dice_loss(F.softmax(out_unl_bg, dim=1), pse_lab_bg_s)
+            unl_s_ce = onehot_ce_loss(F.softmax(out_unl_bg, dim=1), pse_lab_bg_s, mask=torch.ones_like(pse_lab_bg_s))
             
-            l_dice = dice_loss(out_unl_fg, lab_l, lab_s_l, u_weight=args.u_weight, unlab=True), 
-            l_ce = 1 * (CE(out_unl_fg, img_l)).sum() / (mask.sum() + 1e-16)
-            unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
-            l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
-            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg_s, lab_a_bg_s, onehot_mask,
-                                                        u_weight=args.u_weight, unlab=True)
-            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
+            loss_dice = unl_dice + l_dice + unl_s_dice + l_s_dice
+            loss_ce = unl_ce + l_ce + unl_s_ce + l_s_ce
+            # loss_ce = unl_ce + l_ce
 
-            loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
-            loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
-            ### Bidirectional Consistency Loss
-            # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
-
-            # loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), F.softmax((1 - out_l_bg), dim=1))
-            #                     +consistency_criterion(F.softmax(out_l, dim=1), F.softmax((out_l_fg), dim=1))
-            #                     )
-            # loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), F.softmax((1 - out_unl_bg), dim=1))
-            #                     +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
-            #                     )
             topnum=16
-            out_soft_mix = F.softmax(output_mix, dim=1)
+            out_soft_mix = F.softmax(out_mix, dim=1)
             score = torch.max(out_soft_mix, dim=1)[0]
             patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
             patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
@@ -573,20 +539,20 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
-            if iter_num % 20 == 0:
-                image = net_input_unl[1, 0:1, :, :]
-                writer.add_image('train/Un_Image', image, iter_num)
-                outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
-                writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
-                labs = unl_label[1, ...].unsqueeze(0) * 50
-                writer.add_image('train/Un_GroundTruth', labs, iter_num)
+            # if iter_num % 20 == 0:
+            #     image = net_input_unl[1, 0:1, :, :]
+            #     writer.add_image('train/Un_Image', image, iter_num)
+            #     outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
+            #     writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
+            #     labs = unl_label[1, ...].unsqueeze(0) * 50
+            #     writer.add_image('train/Un_GroundTruth', labs, iter_num)
 
-                image_l = net_input_l[1, 0:1, :, :]
-                writer.add_image('train/L_Image', image_l, iter_num)
-                outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
-                writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
-                labs_l = l_label[1, ...].unsqueeze(0) * 50
-                writer.add_image('train/L_GroundTruth', labs_l, iter_num)
+            #     image_l = net_input_l[1, 0:1, :, :]
+            #     writer.add_image('train/L_Image', image_l, iter_num)
+            #     outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
+            #     writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
+            #     labs_l = l_label[1, ...].unsqueeze(0) * 50
+            #     writer.add_image('train/L_GroundTruth', labs_l, iter_num)
 
             if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
