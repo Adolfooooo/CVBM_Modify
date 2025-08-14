@@ -509,15 +509,6 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
-            ### Bidirectional Consistency Loss
-            # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
-
-            # loss_consist_l = (consistency_criterion(F.softmax(out_l_fg, dim=1), F.softmax((1 - out_l_bg), dim=1))
-            #                     +consistency_criterion(F.softmax(out_l, dim=1), F.softmax((out_l_fg), dim=1))
-            #                     )
-            # loss_consist_u = (consistency_criterion(F.softmax(out_unl_fg, dim=1), F.softmax((1 - out_unl_bg), dim=1))
-            #                     +consistency_criterion(F.softmax(out_unl, dim=1), F.softmax((out_unl_fg), dim=1))
-            #                     )
             topnum=16
             out_soft_mix = F.softmax(output_mix, dim=1)
             score = torch.max(out_soft_mix, dim=1)[0]
