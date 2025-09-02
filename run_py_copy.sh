@@ -16,8 +16,8 @@ python -m just_try.ACDC.ACDC_ablation_train_twice \
     --gpu 1 \
     --labelnum 3 \
     --deterministic 0 \
-    --snapshot_path "./results/CVBM_ablation/1" \
-    > output_ACDC_ablation_twice_label3_num1.log 2>&1 &
+    --snapshot_path "./results/CVBM_ablation/2" \
+    > output_ACDC_ablation_twice_label3_num2.log 2>&1 &
 python -m just_try.ACDC.ACDC_ablation_train_twice \
     --root_path '/home/xuminghao/Datasets/ACDC/ACDC_ABD' \
     --exp 'CVBM2d_ACDC' \
@@ -25,23 +25,23 @@ python -m just_try.ACDC.ACDC_ablation_train_twice \
     --gpu 1 \
     --labelnum 7 \
     --deterministic 0 \
-    --snapshot_path "./results/CVBM_ablation/1" \
-    > output_ACDC_ablation_twice_label7_num1.log 2>&1 &
+    --snapshot_path "./results/CVBM_ablation/2" \
+    > output_ACDC_ablation_twice_label7_num2.log 2>&1 &
 wait
 python test_ACDC.py \
     --root_path '/home/xuminghao/Datasets/ACDC/ACDC_ABD' \
     --labelnum 3 \
     --exp 'CVBM2d_ACDC' \
     --model 'CVBM2d' \
-    --snapshot_path "./results/CVBM_ablation/1" > output_ACDC_ablation_twice_label3_num1_test_result.log 2>&1 &
+    --snapshot_path "./results/CVBM_ablation/2" > output_ACDC_ablation_twice_label3_num2_test_result.log 2>&1 &
 python test_ACDC.py \
     --root_path '/home/xuminghao/Datasets/ACDC/ACDC_ABD' \
     --labelnum 7 \
     --exp 'CVBM2d_ACDC' \
     --model 'CVBM2d' \
-    --snapshot_path "./results/CVBM_ablation/1" > output_ACDC_ablation_twice_label7_num1_test_result.log 2>&1 &
+    --snapshot_path "./results/CVBM_ablation/2" > output_ACDC_ablation_twice_label7_num2_test_result.log 2>&1 &
 wait
-$HOME/send_mail.sh -t 2708964632@qq.com -m "ACDC ablation_twice label3 and label7 num1 training finish in 43304 3090."
+$HOME/send_mail.sh -t 2708964632@qq.com -m "ACDC ablation_twice label3 and label7 num2 training finish in 43304 3090."
 
 
 

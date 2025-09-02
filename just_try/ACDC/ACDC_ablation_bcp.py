@@ -45,7 +45,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM/1', help='snapshot path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_ablation_bcp/1', help='snapshot path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -233,18 +233,23 @@ def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, un
     return loss_dice, loss_ce
 
 
-def mix_loss_no_bcp(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
+def mix_loss_no_bcp(output, img_l, l_weight=1.0, u_weight=0.5, unlab=False):
     CE = nn.CrossEntropyLoss(reduction='none')
-    img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
+    if len(output.shape) != 4:
+        assert "error!"
+    h, w = output.shape[-2:]
+    img_l = img_l.type(torch.int64)
     output_soft = F.softmax(output, dim=1)
-    image_weight, patch_weight = l_weight, u_weight
+    # loss_dice = dice_loss(output_soft, img_l.unsqueeze(1), mask.unsqueeze(1)) * image_weight
+    # loss_dice += dice_loss(output_soft, patch_l.unsqueeze(1), patch_mask.unsqueeze(1)) * patch_weight
+    loss_dice = dice_loss(output_soft, img_l.unsqueeze(1))
+    # loss_ce = image_weight * (CE(output, img_l) * mask).sum() / (mask.sum() + 1e-16)
+    # loss_ce += patch_weight * (CE(output, patch_l) * patch_mask).sum() / (patch_mask.sum() + 1e-16)  # loss = loss_ce
+    loss_ce =  (CE(output, img_l)).sum() / (h*w + 1e-16)
     if unlab:
-        image_weight, patch_weight = u_weight, l_weight
-    patch_mask = 1 - mask
-    loss_dice = dice_loss(output_soft, img_l.unsqueeze(1), mask.unsqueeze(1)) * image_weight
-    loss_dice += dice_loss(output_soft, patch_l.unsqueeze(1), patch_mask.unsqueeze(1)) * patch_weight
-    loss_ce = image_weight * (CE(output, img_l) * mask).sum() / (mask.sum() + 1e-16)
-    loss_ce += patch_weight * (CE(output, patch_l) * patch_mask).sum() / (patch_mask.sum() + 1e-16)  # loss = loss_ce
+        # image_weight, patch_weight = u_weight, l_weight
+        loss_dice *= u_weight
+        loss_ce *= u_weight
     return loss_dice, loss_ce
 
 
@@ -440,8 +445,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
-    load_net(ema_model, pre_trained_model)
-    load_net_opt(model, optimizer, pre_trained_model)
+    # load_net(ema_model, pre_trained_model)
+    # load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -494,6 +499,11 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             uimg_a_b = torch.concat([uimg_a, uimg_b], dim=0)
             img_a_b = torch.concat([img_a, img_b], dim=0)
+            ulab_a_b_fg = torch.concat([plab_a_fg, plab_b_fg], dim=0)
+            ulab_a_b_bg = torch.concat([plab_a_bg, plab_b_bg], dim=0)
+            lab_a_b_fg = torch.concat([lab_a, lab_b], dim=0)
+            lab_a_b_bg = torch.concat([lab_a_bg, lab_b_bg], dim=0)
+
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             out_unl_fg,out_unl, out_unl_bg, _, _ = model(uimg_a_b)
@@ -501,8 +511,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             out_l_fg,out_l, out_l_bg, _, _ = model(img_a_b)
 
-            unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
-            l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
+            unl_dice, unl_ce = mix_loss_no_bcp(out_unl_fg, ulab_a_b_fg, u_weight=args.u_weight, unlab=True)
+            l_dice, l_ce = mix_loss_no_bcp(out_l_fg, lab_a_b_fg, u_weight=args.u_weight)
 
             unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg, lab_a_bg, onehot_mask,
                                                         u_weight=args.u_weight, unlab=True)
@@ -606,7 +616,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
