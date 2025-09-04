@@ -333,19 +333,30 @@ class CrossEntropyLoss(nn.Module):
         super(CrossEntropyLoss, self).__init__()
         self.class_num = n_classes
 
-    def _ce_loss(self, score, target, mask):
-        target = target.float()
-        # print(torch.max(score),torch.min(score))
-        loss = (-target * torch.log(score) * mask.float()).sum() / (mask.sum() + 1e-16)
-        return loss
+    def _ce_loss(self, score, target, mask=None):
+        if mask:
+            target = target.float()
+            # print(torch.max(score),torch.min(score))
+            loss = (-target * torch.log(score) * mask.float()).sum() / (mask.sum() + 1e-16)
+            return loss
+        else:
+            target = target.float()
+            h, w = score.shape[-2:]
+            # print(torch.max(score),torch.min(score))
+            loss = (-target * torch.log(score)).sum() / (h*w + 1e-16)
+            return loss
 
-    def forward(self, inputs, target, mask):
+    def forward(self, inputs, target, mask=None):
         inputs = torch.softmax(inputs, dim=1)
         # target = self._one_hot_encoder(target)
         # mask = self._one_hot_mask_encoder(mask)
         loss = 0.0
-        for i in range(0, self.class_num):
-            loss += self._ce_loss(inputs[:, i], target[:, i], mask[:, i])
+        if mask:
+            for i in range(0, self.class_num):
+                loss += self._ce_loss(inputs[:, i], target[:, i], mask[:, i])
+        else:
+            for i in range(0, self.class_num):
+                loss += self._ce_loss(inputs[:, i], target[:, i])
         return loss / self.class_num
 class CrossEntropyLossonehot(nn.Module):
     def __init__(self, n_classes):

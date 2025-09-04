@@ -253,19 +253,18 @@ def mix_loss_no_bcp(output, img_l, l_weight=1.0, u_weight=0.5, unlab=False):
     return loss_dice, loss_ce
 
 
-def onehot_mix_loss_no_bcp(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
+def onehot_mix_loss_no_bcp(output, img_l, l_weight=1.0, u_weight=0.5, unlab=False):
     # CE = CrossEntropyLoss
-    img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
+    img_l = img_l.type(torch.int64)
     output_soft = F.softmax(output, dim=1)
     image_weight, patch_weight = l_weight, u_weight
-    if unlab:
-        image_weight, patch_weight = u_weight, l_weight
-    patch_mask = 1 - mask
-    loss_dice = onehot_dice_loss(output_soft, img_l, mask) * image_weight
-    loss_dice += onehot_dice_loss(output_soft, patch_l, patch_mask) * patch_weight
-    loss_ce = onehot_ce_loss(output_soft, img_l, mask) * image_weight
-    loss_ce += onehot_ce_loss(output_soft, patch_l, patch_mask) * patch_weight  # loss = loss_ce
 
+    loss_dice = onehot_dice_loss(output_soft, img_l)
+    loss_ce = onehot_ce_loss(output_soft, img_l)
+
+    if unlab:
+        loss_dice *= u_weight
+        loss_ce *= u_weight
     return loss_dice, loss_ce
 
 
@@ -482,8 +481,6 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg, _, _ = ema_model(uimg_a)
                 pre_b_fg,pre_b, pre_b_bg, _, _ = ema_model(uimg_b)
-                plab_a = get_ACDC_masks(pre_a, nms=1)
-                plab_b = get_ACDC_masks(pre_b, nms=1)
                 plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
                 plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
                 plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
@@ -514,9 +511,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             unl_dice, unl_ce = mix_loss_no_bcp(out_unl_fg, ulab_a_b_fg, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss_no_bcp(out_l_fg, lab_a_b_fg, u_weight=args.u_weight)
 
-            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg, lab_a_bg, onehot_mask,
-                                                        u_weight=args.u_weight, unlab=True)
-            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg, plab_b_bg, onehot_mask, u_weight=args.u_weight)
+            unl_dice_bg, unl_ce_bg = onehot_mix_loss_no_bcp(out_unl_bg, ulab_a_b_bg, u_weight=args.u_weight, unlab=True)
+            l_dice_bg, l_ce_bg = onehot_mix_loss_no_bcp(out_l_bg, lab_a_b_bg, u_weight=args.u_weight)
 
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
