@@ -334,7 +334,7 @@ class CrossEntropyLoss(nn.Module):
         self.class_num = n_classes
 
     def _ce_loss(self, score, target, mask=None):
-        if mask:
+        if mask is not None:
             target = target.float()
             # print(torch.max(score),torch.min(score))
             loss = (-target * torch.log(score) * mask.float()).sum() / (mask.sum() + 1e-16)
@@ -351,7 +351,7 @@ class CrossEntropyLoss(nn.Module):
         # target = self._one_hot_encoder(target)
         # mask = self._one_hot_mask_encoder(mask)
         loss = 0.0
-        if mask:
+        if mask is not None:
             for i in range(0, self.class_num):
                 loss += self._ce_loss(inputs[:, i], target[:, i], mask[:, i])
         else:
