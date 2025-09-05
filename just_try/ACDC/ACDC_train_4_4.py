@@ -492,12 +492,12 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # conv 3x3 connect
             output_mix = torch.cat([out_unl, out_l], dim=0)
 
-            unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_bg_s, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
-            l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_bg_s, loss_mask, u_weight=args.u_weight)
+            unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_bg_s.detach(), lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
+            l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_bg_s.detach(), loss_mask, u_weight=args.u_weight)
 
-            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, 1-create_onehot.OneHotConverter.to_onehot(sample={'label':plab_a_fg}, num_classes=args.num_classes).get('onehot_label'), lab_a_bg_s, onehot_mask,
+            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, 1-create_onehot.OneHotConverter.to_onehot(sample={'label':plab_a_fg.detach()}, num_classes=args.num_classes).get('onehot_label'), lab_a_bg_s, onehot_mask,
                                                         u_weight=args.u_weight, unlab=True)
-            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg, 1-create_onehot.OneHotConverter.to_onehot(sample={'label':plab_b_fg}, num_classes=args.num_classes).get('onehot_label'), onehot_mask, u_weight=args.u_weight)
+            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg, 1-create_onehot.OneHotConverter.to_onehot(sample={'label':plab_b_fg.detach()}, num_classes=args.num_classes).get('onehot_label'), onehot_mask, u_weight=args.u_weight)
 
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
