@@ -22,7 +22,7 @@ from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
-from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
+from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot, DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
@@ -467,6 +467,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     ema_best_performance = 0.0
     best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
+    dynamic_threshold = DynamicThresholdUpdater
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
@@ -501,19 +502,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
-                # plab_a = get_ACDC_masks(pre_a, nms=1)
-                # plab_b = get_ACDC_masks(pre_b, nms=1)
+
                 plab_a_fg = get_ACDC_masks_with_confidence(pre_a_fg, nms=1)
                 plab_b_fg = get_ACDC_masks_with_confidence(pre_b_fg, nms=1)
-                # plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
-                # plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
 
-                # pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s, uimg_a_s)
-                # pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s, uimg_b_s)
-                # plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
-                # plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
-                # plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
-                # plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
                 plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, nms=1,onehot=True)
                 plab_b_bg_s = get_ACDC_masks_with_confidence(pre_b_bg_s, nms=1,onehot=True)
                 
@@ -563,32 +555,6 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             loss =loss_dice + loss_ce + consistency_weight * bclloss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
-
-
-            # # strong
-            # out_unl_fg_s,out_unl_s, out_unl_bg_s, _, _ = model(net_input_unl_s)
-            # out_l_fg_s,out_l_s, out_l_bg_s, _, _ = model(net_input_l_s)
-
-            # unl_dice_s, unl_ce_s = mix_loss(out_unl_fg_s, plab_a_fg_s, lab_a_s, loss_mask, u_weight=args.u_weight, unlab=True)
-            # l_dice_s, l_ce_s = mix_loss(out_l_fg_s, lab_b_s, plab_b_fg_s, loss_mask, u_weight=args.u_weight)
-
-            # unl_dice_bg_s, unl_ce_bg_s = onehot_mix_loss(out_unl_bg_s, plab_a_bg_s, lab_a_bg_s, onehot_mask,
-            #                                             u_weight=args.u_weight, unlab=True)
-            # l_dice_bg_s, l_ce_bg_s = onehot_mix_loss(out_l_bg_s, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
-
-            # loss_ce_s = unl_ce_s + l_ce_s + unl_ce_bg_s+ l_ce_bg_s
-            # loss_dice_s = unl_dice_s + l_dice_s + unl_dice_bg_s + l_dice_bg_s
-            # ### Bidirectional Consistency Loss
-            # # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
-            # loss_consist_l_s = (consistency_criterion(F.softmax(out_l_fg_s, dim=1), 1 - F.softmax((out_l_bg_s), dim=1))
-            #                     +consistency_criterion(F.softmax(out_l_s, dim=1), F.softmax((out_l_fg_s), dim=1))
-            #                     )
-            # loss_consist_u_s = (consistency_criterion(F.softmax(out_unl_fg_s, dim=1), 1 - F.softmax((out_unl_bg_s), dim=1))
-            #                     +consistency_criterion(F.softmax(out_unl_s, dim=1), F.softmax((out_unl_fg_s), dim=1))
-            #                     )
-            # loss_s =loss_dice_s + loss_ce_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
-
-            # loss = loss + loss_s
 
             optimizer.zero_grad()
             loss.backward()
