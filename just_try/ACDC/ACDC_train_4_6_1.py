@@ -168,6 +168,20 @@ def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
     return indices
 
 
+def get_ACDC_masks_with_confidence_dynamic(output, dynamic_threhold_updater, nms=0, onehot=False):
+    probs = F.softmax(output, dim=1)
+    probs, indices = torch.max(probs, dim=1)
+    dynamic_threhold_updater.update_threshold()
+    confidence_foreground_selection(probs, indices, threshold=0.5)
+    if nms == 1:
+        if onehot:
+            indices = get_ACDC_2DLargestCC_onehot(indices)
+        else:
+            indices = get_ACDC_2DLargestCC(indices)
+    return indices
+
+
+
 def confidence_foreground_selection(segmentation, indices, threshold=0.5):
     """
     基于置信度的前景模块选择
@@ -467,7 +481,12 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     ema_best_performance = 0.0
     best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
-    dynamic_threshold = DynamicThresholdUpdater
+    dynamic_threshold_updater = DynamicThresholdUpdater(
+        class_num=num_classes, 
+        dynamic_thresholds=[0.5, 0.5, 0.5, 0.5], 
+        alpha=alpha,
+        plt_thresholds={}
+        )
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
@@ -503,7 +522,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
 
-                plab_a_fg = get_ACDC_masks_with_confidence(pre_a_fg, nms=1)
+                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, nms=1)
                 plab_b_fg = get_ACDC_masks_with_confidence(pre_b_fg, nms=1)
 
                 plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, nms=1,onehot=True)
@@ -553,7 +572,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             
             bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
 
-            loss =loss_dice + loss_ce + consistency_weight * bclloss
+            loss = loss_dice + loss_ce + consistency_weight * bclloss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             optimizer.zero_grad()
@@ -648,14 +667,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    # shutil.copy('./just_try/ACDC/ACDC_train_4_6.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_4_6_1.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,

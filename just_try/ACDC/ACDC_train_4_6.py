@@ -449,8 +449,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    # load_net(ema_model, pre_trained_model)
-    # load_net_opt(model, optimizer, pre_trained_model)
+    load_net(ema_model, pre_trained_model)
+    load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -531,12 +531,12 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
             net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
 
-            # out_unl_fg,out_unl, out_unl_bg
+            # out_unl_fg, out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
-            # out_l_fg,out_l, out_l_bg
+            out_unl_fg, out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
+            # out_l_fg, out_l, out_l_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
+            out_l_fg, out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
 
             # conv 3x3 connect
             output_mix = torch.cat([out_unl, out_l], dim=0)
@@ -682,14 +682,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    # shutil.copy('./just_try/ACDC/ACDC_train_4_6.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_4_6.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
