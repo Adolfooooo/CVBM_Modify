@@ -22,7 +22,8 @@ from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
-from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot, DynamicThresholdUpdater
+from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
+from utils.DynamicThresholdUpdater import DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
@@ -463,8 +464,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    # load_net(ema_model, pre_trained_model)
-    # load_net_opt(model, optimizer, pre_trained_model)
+    load_net(ema_model, pre_trained_model)
+    load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -522,11 +523,11 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
 
-                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, nms=1)
-                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, nms=1)
+                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, dynamic_threshold_updater, nms=1)
+                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, dynamic_threshold_updater, nms=1)
 
-                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, nms=1,onehot=True)
+                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
