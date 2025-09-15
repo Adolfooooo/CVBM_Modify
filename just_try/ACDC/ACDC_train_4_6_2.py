@@ -481,7 +481,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     ema_best_performance = 0.0
     best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
-    dynamic_threshold_updater = DynamicThresholdUpdater(
+    dynamic_threshold_updater = DynamicThresholdUpdater.DynamicThresholdUpdater_Add_adaptive_alpha(
         class_num=num_classes, 
         dynamic_thresholds=[0.5, 0.5, 0.5, 0.5], 
         alpha=alpha,
