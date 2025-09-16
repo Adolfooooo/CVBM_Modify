@@ -6,3 +6,4 @@ tqdm
 scikit-image
 nibabel
 einops
+opencv-python
