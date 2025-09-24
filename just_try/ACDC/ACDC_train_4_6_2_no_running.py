@@ -56,9 +56,10 @@ dice_loss = losses.DiceLoss(n_classes=4)
 onehot_dice_loss = losses.DiceLoss2d(n_classes=4)
 onehot_ce_loss=losses.CrossEntropyLoss(n_classes=4)
 alpha = 0.99
-num_classes = 2
+num_classes = args.num_classes
 dynamic_threshold_bg = [1/num_classes for i in range(4)]
 dynamic_threshold_fg = [1/num_classes for i in range(4)]
+
 plt_bg, plt_fg = {}, {}
 
 
@@ -156,10 +157,23 @@ def get_ACDC_masks(output, nms=0,onehot=False):
     return probs
 
 
-def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
+# def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
+#     probs = F.softmax(output, dim=1)
+#     probs, indices = torch.max(probs, dim=1)
+#     confidence_foreground_selection(probs, indices, threshold=0.5)
+#     if nms == 1:
+#         if onehot:
+#             indices = get_ACDC_2DLargestCC_onehot(indices)
+#         else:
+#             indices = get_ACDC_2DLargestCC(indices)
+#     return indices
+
+
+def get_ACDC_masks_with_confidence_dynamic(output, dynamic_threhold_updater,dynamic_thres, nms=0, onehot=False):
     probs = F.softmax(output, dim=1)
     probs, indices = torch.max(probs, dim=1)
-    confidence_foreground_selection(probs, indices, threshold=0.5)
+    dynamic_thres = dynamic_threhold_updater.update_threshold(class_num=4, dynamic_thresholds=dynamic_thres, alpha=0.99)
+    indices = generate_pseudo_labels_with_confidence(probs, indices, class_thresholds=dynamic_thres)
     if nms == 1:
         if onehot:
             indices = get_ACDC_2DLargestCC_onehot(indices)
@@ -168,39 +182,38 @@ def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
     return indices
 
 
-def get_ACDC_masks_with_confidence_dynamic(output, dynamic_threhold_updater, nms=0, onehot=False):
-    probs = F.softmax(output, dim=1)
-    probs, indices = torch.max(probs, dim=1)
-    dynamic_threhold_updater.update_threshold(output, 0)
-    confidence_foreground_selection(probs, indices, threshold=0.5)
-    if nms == 1:
-        if onehot:
-            indices = get_ACDC_2DLargestCC_onehot(indices)
-        else:
-            indices = get_ACDC_2DLargestCC(indices)
-    return indices
 
 
-
-def confidence_foreground_selection(segmentation, indices, threshold=0.5):
+def generate_pseudo_labels_with_confidence(predictions, class_thresholds):
     """
-    基于置信度的前景模块选择
+    根据类别阈值生成伪标签
     
     Args:
-        segmentation: torch.Tensor, shape (B, H, W) - 模型输出的最大类别概率
-        indices: torch.Tensor, shape (B, H, W) - 对应的类别标签索引
-        threshold: float - 置信度阈值，默认0.5
+            模型的预测输出（softmax 概率或者 sigmoid 后的置信度）。
+        class_thresholds: list or torch.Tensor, shape (C,)
+            每个类别对应的阈值。
     
     Returns:
-        torch.Tensor, shape (B, H, W) - 过滤后的类别标签（低置信度区域设为0背景）
+        torch.Tensor, shape (B, H, W, D)
+            伪标签（低于对应类别阈值的像素设为0）
     """
-    # 创建置信度掩码：只有高于阈值的像素被认为是前景
-    confidence_mask = segmentation > threshold
-    
-    # 应用置信度掩码：低置信度区域设为背景标签0
-    filtered_indices = indices * confidence_mask
-    
-    return filtered_indices
+    B, C, H, W = predictions.shape
+    if not torch.is_tensor(class_thresholds):
+        class_thresholds = torch.tensor(class_thresholds, device=predictions.device, dtype=predictions.dtype)
+
+    # (B, H, W) 取每个像素的最大概率类别
+    probs, pred_classes = torch.max(predictions, dim=1)  # probs: (B,H,W), pred_classes: (B,H,W)
+
+    # 获取每个像素对应的类别阈值
+    thresholds = class_thresholds[pred_classes]  # (B,H,W)
+
+    # 判断是否超过类别阈值
+    mask = probs > thresholds  # (B,H,W)
+
+    # 应用阈值过滤，低置信度设为背景（0）
+    pseudo_labels = pred_classes * mask
+
+    return pseudo_labels
 
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
@@ -487,6 +500,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
         alpha=alpha,
         plt_thresholds={}
         )
+    dynamic_threshold_class = [1/args.num_classes for i in range(args.num_classes)]
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
@@ -522,11 +536,13 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
 
-                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, nms=1)
-                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, nms=1)
+                print(dynamic_threshold_class)
+                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1)
+                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1)
 
-                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, nms=1,onehot=True)
+                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1,onehot=True)
+                
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
@@ -674,7 +690,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,

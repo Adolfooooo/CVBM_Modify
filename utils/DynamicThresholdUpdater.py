@@ -12,7 +12,8 @@ class DynamicThresholdUpdater:
                  class_num: int,
                  dynamic_thresholds: List[float],
                  alpha: float,
-                 plt_thresholds: Dict):
+                #  plt_thresholds: Dict):
+    ):
         """
         Args:
             class_num: 分类类别数
@@ -23,7 +24,7 @@ class DynamicThresholdUpdater:
         self.class_num = class_num
         self.dynamic_thresholds = dynamic_thresholds
         self.alpha = alpha
-        self.plt_thresholds = plt_thresholds
+        # self.plt_thresholds = plt_thresholds
         
         # 验证阈值列表长度
         assert len(dynamic_thresholds) == class_num, f"阈值列表长度({len(dynamic_thresholds)})必须等于类别数({class_num})"

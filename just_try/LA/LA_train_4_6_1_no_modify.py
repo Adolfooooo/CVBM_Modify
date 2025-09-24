@@ -27,7 +27,7 @@ from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/LA', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM_LA', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
@@ -50,8 +50,29 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_LA_4_2/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1/', help='snapshot path to save model')
 args = parser.parse_args()
+
+
+def confidence_foreground_selection(segmentation, indices, threshold=0.5):
+    """
+    基于置信度的前景模块选择
+    
+    Args:
+        segmentation: torch.Tensor, shape (B, H, W) - 模型输出的最大类别概率
+        indices: torch.Tensor, shape (B, H, W) - 对应的类别标签索引
+        threshold: float - 置信度阈值，默认0.5
+    
+    Returns:
+        torch.Tensor, shape (B, H, W) - 过滤后的类别标签（低置信度区域设为0背景）
+    """
+    # 创建置信度掩码：只有高于阈值的像素被认为是前景
+    confidence_mask = segmentation > threshold
+    
+    # 应用置信度掩码：低置信度区域设为背景标签0
+    filtered_indices = indices * confidence_mask
+    
+    return filtered_indices
 
 
 def get_cut_mask(out, thres=0.5, nms=0):
@@ -63,9 +84,12 @@ def get_cut_mask(out, thres=0.5, nms=0):
     return masks
 
 
-def get_cut_mask_bg(out, thres=0.5, nms=0):
+def get_cut_mask_with_confidence_dynamic(out, dynamic_threhold_updater, thres=0.5, nms=0):
     probs = F.softmax(out, 1)
-    masks = (probs <= thres).type(torch.int64)
+    probs, indices = torch.max(probs, dim=1)
+    dynamic_threhold_updater.update_threshold(out, 0)
+    confidence_foreground_selection(probs, indices, threshold=)
+    masks = (probs >= thres).type(torch.int64)
     masks = masks[:, 1, :, :].contiguous()
     if nms == 1:
         masks = LargestCC(masks)
