@@ -1,4 +1,5 @@
 import argparse
+
 import logging
 
 import os
@@ -22,8 +23,7 @@ from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
-from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
-from utils.DynamicThresholdUpdater import DynamicThresholdUpdater
+from utils import losses, ramps, feature_memory, contrastive_losses, val_2d
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
@@ -48,7 +48,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2_2/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -56,12 +56,6 @@ self_max_iterations = args.max_iterations
 dice_loss = losses.DiceLoss(n_classes=4)
 onehot_dice_loss = losses.DiceLoss2d(n_classes=4)
 onehot_ce_loss=losses.CrossEntropyLoss(n_classes=4)
-alpha = 0.99
-num_classes = 2
-dynamic_threshold_bg = [1/num_classes for i in range(4)]
-dynamic_threshold_fg = [1/num_classes for i in range(4)]
-plt_bg, plt_fg = {}, {}
-
 
 
 def load_net(net, path):
@@ -121,12 +115,9 @@ def get_ACDC_2DLargestCC(segmentation):
 
 
 def get_ACDC_2DLargestCC_onehot(segmentation):
-    '''
-    inputs: segementation: BxHxW, indices
-    '''
     batch_list = []
-    batch_num = segmentation.shape[0]
-    for i in range(0, batch_num):
+    N = segmentation.shape[0]
+    for i in range(0, N):
         class_list = []
         for c in range(0, 4):
             temp_seg = segmentation[i]  # == c *  torch.ones_like(segmentation[i])
@@ -147,61 +138,14 @@ def get_ACDC_2DLargestCC_onehot(segmentation):
 
 def get_ACDC_masks(output, nms=0,onehot=False):
     probs = F.softmax(output, dim=1)
-    probs, indices = torch.max(probs, dim=1)
-
+    _, probs = torch.max(probs, dim=1)
     if nms == 1:
         if onehot:
-            probs = get_ACDC_2DLargestCC_onehot(indices)
+            probs = get_ACDC_2DLargestCC_onehot(probs)
         else:
-            probs = get_ACDC_2DLargestCC(indices)
+            probs = get_ACDC_2DLargestCC(probs)
     return probs
 
-
-def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
-    probs = F.softmax(output, dim=1)
-    probs, indices = torch.max(probs, dim=1)
-    confidence_foreground_selection(probs, indices, threshold=0.5)
-    if nms == 1:
-        if onehot:
-            indices = get_ACDC_2DLargestCC_onehot(indices)
-        else:
-            indices = get_ACDC_2DLargestCC(indices)
-    return indices
-
-
-def get_ACDC_masks_with_confidence_dynamic(output, dynamic_threhold_updater, nms=0, onehot=False):
-    probs = F.softmax(output, dim=1)
-    probs, indices = torch.max(probs, dim=1)
-    dynamic_threhold_updater.update_threshold(output, 0)
-    confidence_foreground_selection(probs, indices, threshold=0.5)
-    if nms == 1:
-        if onehot:
-            indices = get_ACDC_2DLargestCC_onehot(indices)
-        else:
-            indices = get_ACDC_2DLargestCC(indices)
-    return indices
-
-
-
-def confidence_foreground_selection(segmentation, indices, threshold=0.5):
-    """
-    基于置信度的前景模块选择
-    
-    Args:
-        segmentation: torch.Tensor, shape (B, H, W) - 模型输出的最大类别概率
-        indices: torch.Tensor, shape (B, H, W) - 对应的类别标签索引
-        threshold: float - 置信度阈值，默认0.5
-    
-    Returns:
-        torch.Tensor, shape (B, H, W) - 过滤后的类别标签（低置信度区域设为0背景）
-    """
-    # 创建置信度掩码：只有高于阈值的像素被认为是前景
-    confidence_mask = segmentation > threshold
-    
-    # 应用置信度掩码：低置信度区域设为背景标签0
-    filtered_indices = indices * confidence_mask
-    
-    return filtered_indices
 
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
@@ -300,6 +244,54 @@ def patients_to_slices(dataset, patiens_num):
         print("Error")
     return ref_dict[str(patiens_num)]
 
+
+def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4)):
+    """
+    output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
+    返回:
+      pos_patches: [B, topnum, C]
+      neg_patches: [B, L-topnum, C]
+    """
+    B, C, H, W = output_mix.shape
+    ph, pw = patch_size
+    assert H % ph == 0 and W % pw == 0, "H/W 必须能被 patch_size 整除（不重叠 patch）"
+
+    # 1) 概率 & 置信度图
+    probs = F.softmax(output_mix, dim=1)          # [B, C, H, W]
+    score = probs.max(dim=1, keepdim=True).values # [B, 1, H, W]
+
+    # 2) 用 unfold 把置信度图切 patch，并做均值 -> 每个 patch 的置信度
+    # unfold 输出 [B, patch_area, L]，L 为 patch 个数
+    score_patches = F.unfold(score, kernel_size=(ph, pw), stride=(ph, pw))  # [B, ph*pw, L]
+    patch_conf = score_patches.mean(dim=1)                                   # [B, L]
+
+    # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
+    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=False)        # [B, topnum]
+    B_, L = patch_conf.shape
+    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
+    mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
+    mask.scatter_(1, top_idx, False)                                          # 正样本位置设为 False
+    # 剩余的就是负样本
+    num_neg = L - topnum
+
+    # 4) 切特征图并对齐到 [B, L, C]（每个 patch 一个向量，features_dim=C）
+    # 对概率图做 unfold: [B, C*ph*pw, L] -> [B, C, ph*pw, L] -> 在 patch 内做均值 -> [B, C, L] -> [B, L, C]
+    feat_patches = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))     # [B, C*ph*pw, L]
+    feat_patches = feat_patches.view(B, C, ph*pw, L).mean(dim=2)              # [B, C, L]
+    feat_patches = feat_patches.permute(0, 2, 1).contiguous()                 # [B, L, C]
+
+    # 5) 基于索引/掩码取出正负 patch，得到 [B, patchnum, features_dim]
+    # 正样本（最低置信度的 topnum 个）
+    pos_patches = torch.gather(
+        feat_patches, dim=1,
+        index=top_idx.unsqueeze(-1).expand(-1, -1, C)                         # [B, topnum, C]
+    )                                                                          # -> [B, topnum, C]
+
+    # 负样本（其余 patch）
+    # 用布尔掩码批量选择，再 reshape 回 [B, L-topnum, C]
+    neg_patches = feat_patches[mask].view(B, num_neg, C)                      # [B, L-topnum, C]
+
+    return pos_patches, neg_patches
 
 def pre_train(args, snapshot_path):
     base_lr = args.base_lr
@@ -482,12 +474,6 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     ema_best_performance = 0.0
     best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
-    dynamic_threshold_updater = DynamicThresholdUpdater(
-        class_num=num_classes, 
-        dynamic_thresholds=[0.5, 0.5, 0.5, 0.5], 
-        alpha=alpha,
-        plt_thresholds={}
-        )
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
@@ -501,6 +487,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             volume_batch, label_batch, onehot_label_batch = volume_batch.cuda(), label_batch.cuda(), onehot_label_batch.cuda()
             volume_batch_strong, label_batch_strong, onehot_label_batch_strong = \
                 volume_batch_strong.cuda(), label_batch_strong.cuda(), onehot_label_batch_strong.cuda()
+
 
             img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
             uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
@@ -522,12 +509,21 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
+                # plab_a = get_ACDC_masks(pre_a, nms=1)
+                # plab_b = get_ACDC_masks(pre_b, nms=1)
+                plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
+                plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
+                # plab_a_bg = get_ACDC_masks(pre_a_bg, nms=1,onehot=True)
+                # plab_b_bg = get_ACDC_masks(pre_b_bg, nms=1,onehot=True)
 
-                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, dynamic_threshold_updater, nms=1)
-                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, dynamic_threshold_updater, nms=1)
-
-                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
+                # pre_a_fg_s,pre_a_s, pre_a_bg_s, _, _ = ema_model(uimg_a_s, uimg_a_s)
+                # pre_b_fg_s,pre_b_s, pre_b_bg_s, _, _ = ema_model(uimg_b_s, uimg_b_s)
+                # plab_b_s = get_ACDC_masks(pre_b_s, nms=1)
+                # plab_a_s = get_ACDC_masks(pre_a_s, nms=1)
+                # plab_a_fg_s = get_ACDC_masks(pre_a_fg_s, nms=1)
+                # plab_b_fg_s = get_ACDC_masks(pre_b_fg_s, nms=1)
+                plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
@@ -563,18 +559,16 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
-            topnum=16
-            out_soft_mix = F.softmax(output_mix, dim=1)
-            score = torch.max(out_soft_mix, dim=1)[0]
-            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
-            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1)
-            total_patch = patches_outputs_1.shape[1]
-            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1, largest=False)
-            
-            bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
+            pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4))
+            # 现在形状满足你的要求：
+            #   pos_patches: [B, 16, C] 作为正样本（低置信度）
+            #   neg_patches: [B, L-16, C] 作为负样本
+            bclloss = BCLLoss(pos_patches, neg_patches)
 
-            loss = loss_dice + loss_ce + consistency_weight * bclloss
+            loss =loss_dice + loss_ce + consistency_weight * bclloss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
+
+
 
             optimizer.zero_grad()
             loss.backward()
@@ -668,7 +662,7 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_6_1.py', self_snapshot_path)
+    # shutil.copy('./just_try/ACDC/ACDC_train_4_2_2.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
