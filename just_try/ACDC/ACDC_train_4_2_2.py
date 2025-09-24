@@ -245,6 +245,177 @@ def patients_to_slices(dataset, patiens_num):
     return ref_dict[str(patiens_num)]
 
 
+def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4)):
+    """
+    output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
+    返回:
+      pos_patches: [B, topnum, C]
+      neg_patches: [B, L-topnum, C]
+    """
+    B, C, H, W = output_mix.shape
+    ph, pw = patch_size
+    assert H % ph == 0 and W % pw == 0, "H/W 必须能被 patch_size 整除（不重叠 patch）"
+
+    # 1) 概率 & 置信度图
+    probs = F.softmax(output_mix, dim=1)          # [B, C, H, W]
+    score = probs.max(dim=1, keepdim=True).values # [B, 1, H, W]
+
+    # 2) 用 unfold 把置信度图切 patch，并做均值 -> 每个 patch 的置信度
+    # unfold 输出 [B, patch_area, L]，L 为 patch 个数
+    score_patches = F.unfold(score, kernel_size=(ph, pw), stride=(ph, pw))  # [B, ph*pw, L]
+    patch_conf = score_patches.mean(dim=1)                                   # [B, L]
+
+    # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
+    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=False)        # [B, topnum]
+    B_, L = patch_conf.shape
+    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
+    mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
+    mask.scatter_(1, top_idx, False)                                          # 正样本位置设为 False
+    # 剩余的就是负样本
+    num_neg = L - topnum
+
+    # 4) 切特征图并对齐到 [B, L, C]（每个 patch 一个向量，features_dim=C）
+    # 对概率图做 unfold: [B, C*ph*pw, L] -> [B, C, ph*pw, L] -> 在 patch 内做均值 -> [B, C, L] -> [B, L, C]
+    feat_patches = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))     # [B, C*ph*pw, L]
+    feat_patches = feat_patches.view(B, C, ph*pw, L).mean(dim=2)              # [B, C, L]
+    feat_patches = feat_patches.permute(0, 2, 1).contiguous()                 # [B, L, C]
+
+    # 5) 基于索引/掩码取出正负 patch，得到 [B, patchnum, features_dim]
+    # 正样本（最低置信度的 topnum 个）
+    pos_patches = torch.gather(
+        feat_patches, dim=1,
+        index=top_idx.unsqueeze(-1).expand(-1, -1, C)                         # [B, topnum, C]
+    )                                                                          # -> [B, topnum, C]
+
+    # 负样本（其余 patch）
+    # 用布尔掩码批量选择，再 reshape 回 [B, L-topnum, C]
+    neg_patches = feat_patches[mask].view(B, num_neg, C)                      # [B, L-topnum, C]
+
+    return pos_patches, neg_patches
+
+def pre_train(args, snapshot_path):
+    base_lr = args.base_lr
+    num_classes = args.num_classes
+    max_iterations = args.max_iterations
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
+    labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
+        
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train_4_1")
+    # model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
+
+    def worker_init_fn(worker_id):
+        random.seed(args.seed + worker_id)
+
+    db_train = BaseDataSets(base_dir=args.root_path,
+                            split="train",
+                            num=None,
+                            transform=transforms.Compose([
+                                WeakStrongAugment(args.patch_size),
+                                CreateOnehotLabel(args.num_classes)
+                            ]))
+    db_val = BaseDataSets(base_dir=args.root_path, split="val")
+    total_slices = len(db_train)
+    labeled_slice = patients_to_slices(args.root_path, args.labelnum)
+    print("Total slices is: {}, labeled slices is:{}".format(total_slices, labeled_slice))
+    labeled_idxs = list(range(0, labeled_slice))
+    unlabeled_idxs = list(range(labeled_slice, total_slices))
+    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
+                                          args.batch_size - args.labeled_bs)
+
+    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
+                             worker_init_fn=worker_init_fn)
+
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
+
+    optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+
+    writer = SummaryWriter(snapshot_path + '/log')
+    logging.info("Start pre_training")
+    logging.info("{} iterations per epoch".format(len(trainloader)))
+
+    model.train()
+
+    iter_num = 0
+    max_epoch = pre_max_iterations // len(trainloader) + 1
+    best_performance = 0.0
+    best_hd = 100
+    iterator = tqdm(range(max_epoch), ncols=70)
+    for _ in iterator:
+        for _, sampled_batch in enumerate(trainloader):
+            volume_batch, label_batch, onehot_label_batch = sampled_batch['image'], sampled_batch['label'], \
+                                                            sampled_batch['onehot_label']
+            volume_batch, label_batch, onehot_label_batch = volume_batch.cuda(), label_batch.cuda(), onehot_label_batch.cuda()
+
+            img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
+            lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
+            onehot_lab_a, onehot_lab_b = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
+                                                                                   labeled_sub_bs:args.labeled_bs] == 0
+            img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
+            gt_mixl = lab_a * img_mask + lab_b * (1 - img_mask)
+            onehot_gt_mixl = onehot_lab_a * img_mask + onehot_lab_b * (1 - img_mask)
+            # -- original
+            net_input = img_a * img_mask + img_b * (1 - img_mask)
+            out_mixl_fg,out_mixl, outputs_mixl_bg, _, _ = model(net_input, net_input)
+            loss_dice, loss_ce = mix_loss(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
+            loss_dice_bg, loss_ce_bg = onehot_mix_loss(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
+                                                       unlab=True)
+            loss = (loss_dice + loss_dice_bg + loss_ce + loss_ce_bg) / 2
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            iter_num += 1
+
+            writer.add_scalar('info/total_loss', loss, iter_num)
+            writer.add_scalar('info/mix_dice', loss_dice, iter_num)
+            writer.add_scalar('info/mix_ce', loss_ce, iter_num)
+
+            logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
+
+            if iter_num % 20 == 0:
+                image = net_input[1, 0:1, :, :]
+                writer.add_image('pre_train/Mixed_Image', image, iter_num)
+                outputs = torch.argmax(torch.softmax(out_mixl, dim=1), dim=1, keepdim=True)
+                writer.add_image('pre_train/Mixed_Prediction', outputs[1, ...] * 50, iter_num)
+                labs = gt_mixl[1, ...].unsqueeze(0) * 50
+                writer.add_image('pre_train/Mixed_GroundTruth', labs, iter_num)
+
+            if iter_num > 0 and iter_num % 200 == 0:
+                model.eval()
+                metric_list = 0.0
+                for _, sampled_batch in enumerate(valloader):
+                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
+                                                         classes=num_classes)
+                    metric_list += np.array(metric_i)
+                metric_list = metric_list / len(db_val)
+                for class_i in range(num_classes - 1):
+                    writer.add_scalar('info/val_{}_dice'.format(class_i + 1), metric_list[class_i, 0], iter_num)
+                    writer.add_scalar('info/val_{}_hd95'.format(class_i + 1), metric_list[class_i, 1], iter_num)
+
+                performance = np.mean(metric_list, axis=0)[0]
+                writer.add_scalar('info/val_mean_dice', performance, iter_num)
+
+                if performance > best_performance:
+                    best_performance = performance
+                    save_mode_path = os.path.join(snapshot_path,
+                                                  'iter_{}_dice_{}.pth'.format(iter_num, round(best_performance, 4)))
+                    save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+                    save_net_opt(model, optimizer, save_mode_path)
+                    save_net_opt(model, optimizer, save_best_path)
+
+                logging.info('iteration %d : mean_dice : %f' % (iter_num, performance))
+                model.train()
+
+            if iter_num >= max_iterations:
+                break
+        if iter_num >= max_iterations:
+            iterator.close()
+            break
+    writer.close()
+
+
 def self_train(args, pre_snapshot_path, snapshot_path):
     base_lr = args.base_lr
     num_classes = args.num_classes
@@ -284,7 +455,9 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-        
+    
+    # load_net(ema_model, pre_trained_model)
+    # load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -386,44 +559,16 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
-            topnum=16
-            out_soft_mix = F.softmax(output_mix, dim=1)
-            score = torch.max(out_soft_mix, dim=1)[0]
-            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
-            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1, largest=False)
-            total_patch = patches_outputs_1.shape[1]
-            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1)
-            
-            bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
+            pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4))
+            # 现在形状满足你的要求：
+            #   pos_patches: [B, 16, C] 作为正样本（低置信度）
+            #   neg_patches: [B, L-16, C] 作为负样本
+            bclloss = BCLLoss(pos_patches, neg_patches)
 
             loss =loss_dice + loss_ce + consistency_weight * bclloss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
 
-            # # strong
-            # out_unl_fg_s,out_unl_s, out_unl_bg_s, _, _ = model(net_input_unl_s)
-            # out_l_fg_s,out_l_s, out_l_bg_s, _, _ = model(net_input_l_s)
-
-            # unl_dice_s, unl_ce_s = mix_loss(out_unl_fg_s, plab_a_fg_s, lab_a_s, loss_mask, u_weight=args.u_weight, unlab=True)
-            # l_dice_s, l_ce_s = mix_loss(out_l_fg_s, lab_b_s, plab_b_fg_s, loss_mask, u_weight=args.u_weight)
-
-            # unl_dice_bg_s, unl_ce_bg_s = onehot_mix_loss(out_unl_bg_s, plab_a_bg_s, lab_a_bg_s, onehot_mask,
-            #                                             u_weight=args.u_weight, unlab=True)
-            # l_dice_bg_s, l_ce_bg_s = onehot_mix_loss(out_l_bg_s, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
-
-            # loss_ce_s = unl_ce_s + l_ce_s + unl_ce_bg_s+ l_ce_bg_s
-            # loss_dice_s = unl_dice_s + l_dice_s + unl_dice_bg_s + l_dice_bg_s
-            # ### Bidirectional Consistency Loss
-            # # F.softmax(out_l_fg, dim=1): torch.Size([B, 4, 256, 256])
-            # loss_consist_l_s = (consistency_criterion(F.softmax(out_l_fg_s, dim=1), 1 - F.softmax((out_l_bg_s), dim=1))
-            #                     +consistency_criterion(F.softmax(out_l_s, dim=1), F.softmax((out_l_fg_s), dim=1))
-            #                     )
-            # loss_consist_u_s = (consistency_criterion(F.softmax(out_unl_fg_s, dim=1), 1 - F.softmax((out_unl_bg_s), dim=1))
-            #                     +consistency_criterion(F.softmax(out_unl_s, dim=1), F.softmax((out_unl_fg_s), dim=1))
-            #                     )
-            # loss_s =loss_dice_s + loss_ce_s + consistency_weight * (loss_consist_l_s + loss_consist_u_s)
-
-            # loss = loss + loss_s
 
             optimizer.zero_grad()
             loss.backward()
@@ -517,13 +662,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_2_2.py', self_snapshot_path)
+    # shutil.copy('./just_try/ACDC/ACDC_train_4_2_2.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
+    # pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
