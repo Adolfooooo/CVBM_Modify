@@ -245,7 +245,7 @@ def patients_to_slices(dataset, patiens_num):
     return ref_dict[str(patiens_num)]
 
 
-def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4)):
+def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose_largest=False):
     """
     output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
     返回:
@@ -266,7 +266,7 @@ def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4)):
     patch_conf = score_patches.mean(dim=1)                                   # [B, L]
 
     # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
-    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=False)        # [B, topnum]
+    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)        # [B, topnum]
     B_, L = patch_conf.shape
     all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
     mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
