@@ -566,8 +566,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     dynamic_threshold_updater = DynamicThresholdUpdater(
         class_num=num_classes, 
         dynamic_thresholds=[0.5, 0.5, 0.5, 0.5], 
-        alpha=alpha,
-        plt_thresholds={}
+        alpha=alpha
         )
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
