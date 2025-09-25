@@ -48,7 +48,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_3/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -545,8 +545,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    # load_net(ema_model, pre_trained_model)
-    # load_net_opt(model, optimizer, pre_trained_model)
+    load_net(ema_model, pre_trained_model)
+    load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -562,12 +562,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     best_performance = 0.0
     ema_best_performance = 0.0
     best_hd = 100
-    iterator = tqdm(range(max_epoch), ncols=70)
-    dynamic_threshold_updater = DynamicThresholdUpdater(
-        class_num=num_classes, 
-        dynamic_thresholds=[0.5, 0.5, 0.5, 0.5], 
-        alpha=alpha
-        )
+    iterator = tqdm(range(max_epoch), ncols=70)    
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
@@ -603,11 +598,11 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
 
-                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, dynamic_threshold_updater, nms=1)
-                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, dynamic_threshold_updater, nms=1)
+                plab_a_fg = get_ACDC_masks_with_confidence(pre_a_fg, nms=1)
+                plab_b_fg = get_ACDC_masks_with_confidence(pre_b_fg, nms=1)
 
-                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
+                plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks_with_confidence(pre_b_bg_s, nms=1,onehot=True)
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
@@ -744,14 +739,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_6_1.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_4_6_3.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,

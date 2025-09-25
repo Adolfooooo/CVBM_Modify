@@ -513,13 +513,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     best_performance = 0.0
     ema_best_performance = 0.0
     best_hd = 100
-    iterator = tqdm(range(max_epoch), ncols=70)
-    dynamic_threshold_updater = DynamicThresholdUpdater(
-        class_num=num_classes, 
-        dynamic_thresholds=[0.5, 0.5, 0.5, 0.5], 
-        alpha=alpha,
-        plt_thresholds={}
-        )
+    iterator = tqdm(range(max_epoch), ncols=70)    
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
@@ -555,11 +549,11 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
 
-                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, dynamic_threshold_updater, nms=1)
-                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, dynamic_threshold_updater, nms=1)
+                plab_a_fg = get_ACDC_masks_with_confidence(pre_a_fg, dynamic_threshold_updater, nms=1)
+                plab_b_fg = get_ACDC_masks_with_confidence(pre_b_fg, dynamic_threshold_updater, nms=1)
 
-                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
+                plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks_with_confidence(pre_b_bg_s, dynamic_threshold_updater, nms=1,onehot=True)
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
