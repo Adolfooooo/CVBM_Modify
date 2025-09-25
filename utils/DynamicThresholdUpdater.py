@@ -45,12 +45,10 @@ class DynamicThresholdUpdater:
         pseudo_label = torch.argmax(output_unlabeled, dim=1)
         # 转换为softmax概率
         current_unlabeled_soft = F.softmax(output_unlabeled, dim=1)
-        
         # 计算每个类别的概率均值
         for class_idx in range(self.class_num):
             # 获取当前类别的像素索引
             index_gt_class = (pseudo_label == class_idx)
-            
             # 计算当前类别的概率均值
             if index_gt_class.sum() > 0:
                 mean_probs[class_idx] = current_unlabeled_soft[:, class_idx][index_gt_class].mean().item()
@@ -68,6 +66,35 @@ class DynamicThresholdUpdater:
         
         # 记录历史
         # self.plt_thresholds[iter_num] = self.dynamic_thresholds.copy()
+
+
+    def generate_pseudo_labels_with_confidence(self, probs, pred_classes):
+        """
+        根据类别阈值生成伪标签
+        
+        Args:
+            probs: prediction max
+            pred_classes: prediction max indices
+
+        Returns:
+            torch.Tensor, shape (B, H, W, D)
+                伪标签（低于对应类别阈值的像素设为0）
+        """
+
+        if not torch.is_tensor(self.dynamic_thresholds):
+            self.dynamic_thresholds = torch.tensor(self.dynamic_thresholds, device=pred_classes.device, dtype=torch.float32)
+        # # (B, H, W) 取每个像素的最大概率类别
+        # probs, pred_classes = torch.max(predictions, dim=1)  # probs: (B,H,W), pred_classes: (B,H,W)
+        # 获取每个像素对应的类别阈值
+        thresholds = self.dynamic_thresholds[pred_classes]  # (B,H,W)
+        # 判断是否超过类别阈值
+        mask = probs > thresholds  # (B,H,W)
+        # 应用阈值过滤，低置信度设为背景（0）
+        pseudo_labels = pred_classes * mask
+
+        ### test
+        print(self.dynamic_thresholds)
+        return pseudo_labels
 
 
 class DynamicThresholdUpdater_Add_adaptive_alpha:

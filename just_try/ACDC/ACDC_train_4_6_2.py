@@ -47,7 +47,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_2/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -169,11 +169,11 @@ def get_ACDC_masks(output, nms=0,onehot=False):
 #     return indices
 
 
-def get_ACDC_masks_with_confidence_dynamic(output, dynamic_threhold_updater,dynamic_thres, nms=0, onehot=False):
+def get_ACDC_masks_with_confidence_dynamic(output,dynamic_threhold_updater,nms=0, onehot=False):
     probs = F.softmax(output, dim=1)
     probs, indices = torch.max(probs, dim=1)
-    dynamic_thres = dynamic_threhold_updater.update_threshold(class_num=4, dynamic_thresholds=dynamic_thres, alpha=0.99)
-    indices = generate_pseudo_labels_with_confidence(probs, indices, class_thresholds=dynamic_thres)
+    dynamic_thres = dynamic_threhold_updater.update_threshold(output, 0)
+    indices = dynamic_threhold_updater.generate_pseudo_labels_with_confidence(probs, indices)
     if nms == 1:
         if onehot:
             indices = get_ACDC_2DLargestCC_onehot(indices)
@@ -181,39 +181,6 @@ def get_ACDC_masks_with_confidence_dynamic(output, dynamic_threhold_updater,dyna
             indices = get_ACDC_2DLargestCC(indices)
     return indices
 
-
-
-
-def generate_pseudo_labels_with_confidence(predictions, class_thresholds):
-    """
-    根据类别阈值生成伪标签
-    
-    Args:
-            模型的预测输出（softmax 概率或者 sigmoid 后的置信度）。
-        class_thresholds: list or torch.Tensor, shape (C,)
-            每个类别对应的阈值。
-    
-    Returns:
-        torch.Tensor, shape (B, H, W, D)
-            伪标签（低于对应类别阈值的像素设为0）
-    """
-    B, C, H, W = predictions.shape
-    if not torch.is_tensor(class_thresholds):
-        class_thresholds = torch.tensor(class_thresholds, device=predictions.device, dtype=predictions.dtype)
-
-    # (B, H, W) 取每个像素的最大概率类别
-    probs, pred_classes = torch.max(predictions, dim=1)  # probs: (B,H,W), pred_classes: (B,H,W)
-
-    # 获取每个像素对应的类别阈值
-    thresholds = class_thresholds[pred_classes]  # (B,H,W)
-
-    # 判断是否超过类别阈值
-    mask = probs > thresholds  # (B,H,W)
-
-    # 应用阈值过滤，低置信度设为背景（0）
-    pseudo_labels = pred_classes * mask
-
-    return pseudo_labels
 
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
@@ -494,11 +461,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     ema_best_performance = 0.0
     best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
-    dynamic_threshold_updater = DynamicThresholdUpdater.DynamicThresholdUpdater_Add_adaptive_alpha(
+    dynamic_threshold_updater = DynamicThresholdUpdater.DynamicThresholdUpdater(
         class_num=num_classes, 
         dynamic_thresholds=[0.5, 0.5, 0.5, 0.5], 
-        alpha=alpha,
-        plt_thresholds={}
+        alpha=alpha
         )
     dynamic_threshold_class = [1/args.num_classes for i in range(args.num_classes)]
     for _ in iterator:
@@ -536,12 +502,11 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
 
-                print(dynamic_threshold_class)
-                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1)
-                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1)
+                plab_a_fg = get_ACDC_masks_with_confidence_dynamic(pre_a_fg, dynamic_threhold_updater=dynamic_threshold_updater,nms=1)
+                plab_b_fg = get_ACDC_masks_with_confidence_dynamic(pre_b_fg, dynamic_threhold_updater=dynamic_threshold_updater,nms=1)
 
-                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, dynamic_threhold_updater=dynamic_threshold_updater,dynamic_thres=dynamic_threshold_class,nms=1,onehot=True)
+                plab_a_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_a_bg_s, dynamic_threhold_updater=dynamic_threshold_updater,nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks_with_confidence_dynamic(pre_b_bg_s, dynamic_threhold_updater=dynamic_threshold_updater,nms=1,onehot=True)
                 
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
