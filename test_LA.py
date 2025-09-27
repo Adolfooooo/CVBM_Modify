@@ -67,7 +67,7 @@ def test_calculate_metric_argument():
                            metric_detail=args.detail, nms=args.nms)
     
     model.load_state_dict(torch.load(save_ema_model_path))
-    print("init weight from {}".format(save_model_path))
+    print("init weight from {}".format(save_ema_model_path))
     avg_metric = test_all_case_argument(model, image_list, num_classes=num_classes,
                            patch_size=(112, 112, 80), stride_xy=18, stride_z=4,
                            save_result=False, test_save_path=test_save_path,

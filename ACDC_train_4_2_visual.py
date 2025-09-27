@@ -374,6 +374,55 @@ def pre_train(args, snapshot_path):
     writer.close()
 
 
+def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose_largest=False):
+    """
+    output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
+    返回:
+      pos_patches: [B, topnum, C]
+      neg_patches: [B, L-topnum, C]
+    """
+    B, C, H, W = output_mix.shape
+    ph, pw = patch_size
+    assert H % ph == 0 and W % pw == 0, "H/W 必须能被 patch_size 整除（不重叠 patch）"
+
+    # 1) 概率 & 置信度图
+    probs = F.softmax(output_mix, dim=1)          # [B, C, H, W]
+    score = probs.max(dim=1, keepdim=True).values # [B, 1, H, W]
+
+    # 2) 用 unfold 把置信度图切 patch，并做均值 -> 每个 patch 的置信度
+    # unfold 输出 [B, patch_area, L]，L 为 patch 个数
+    score_patches = F.unfold(score, kernel_size=(ph, pw), stride=(ph, pw))  # [B, ph*pw, L]
+    patch_conf = score_patches.mean(dim=1)                                   # [B, L]
+
+    # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
+    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)        # [B, topnum]
+    B_, L = patch_conf.shape
+    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
+    mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
+    mask.scatter_(1, top_idx, False)                                          # 正样本位置设为 False
+    # 剩余的就是负样本
+    num_neg = L - topnum
+
+    # 4) 切特征图并对齐到 [B, L, C]（每个 patch 一个向量，features_dim=C）
+    # 对概率图做 unfold: [B, C*ph*pw, L] -> [B, C, ph*pw, L] -> 在 patch 内做均值 -> [B, C, L] -> [B, L, C]
+    feat_patches = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))     # [B, C*ph*pw, L]
+    feat_patches = feat_patches.view(B, C, ph*pw, L).mean(dim=2)              # [B, C, L]
+    feat_patches = feat_patches.permute(0, 2, 1).contiguous()                 # [B, L, C]
+
+    # 5) 基于索引/掩码取出正负 patch，得到 [B, patchnum, features_dim]
+    # 正样本（最低置信度的 topnum 个）
+    pos_patches = torch.gather(
+        feat_patches, dim=1,
+        index=top_idx.unsqueeze(-1).expand(-1, -1, C)                         # [B, topnum, C]
+    )                                                                          # -> [B, topnum, C]
+
+    # 负样本（其余 patch）
+    # 用布尔掩码批量选择，再 reshape 回 [B, L-topnum, C]
+    neg_patches = feat_patches[mask].view(B, num_neg, C)                      # [B, L-topnum, C]
+
+    return pos_patches, neg_patches
+
+
 def self_train_visual(args, pre_snapshot_path, snapshot_path):
     base_lr = args.base_lr
     num_classes = args.num_classes
@@ -523,21 +572,29 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             
             bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
 
-            loss =loss_dice + loss_ce + consistency_weight * bclloss
+            # pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4))
+            # # 现在形状满足你的要求：
+            # #   pos_patches: [B, 16, C] 作为正样本（低置信度）
+            # #   neg_patches: [B, L-16, C] 作为负样本
+            # bclloss = BCLLoss(pos_patches, neg_patches)
 
+            # loss =loss_dice + loss_ce + consistency_weight * bclloss
 
             ### visualization
-            visualizer.visualize_prediction(
-                image_sample={"image":net_input_l[0], 'label': l_label[0]},
-                features=out_l_fg[0]
-                )
-            visualizer.visualiza_patch_in_pic_version1(
-                image_sample={"image":net_input_l[0], 'label': l_label[0]},
-                features=out_l_fg[0],
-                low_confidence_indices=patches_mean_1_top_indices,
-                grid_size=topnum,
-                pic_name='low_confidence_patches_iter_{}.png'.format(iter_num),
-            )
+            # visualizer.visualize_prediction(
+            #     image_sample={"image":net_input_l[0], 'label': l_label[0]},
+            #     features=out_l_fg[0]
+            #     )
+            # visualizer.visualiza_patch_in_pic_version1(
+            #     image_sample={"image":net_input_l[0], 'label': l_label[0]},
+            #     features=out_l_fg[0],
+            #     low_confidence_indices=patches_mean_1_top_indices,
+            #     grid_size=topnum,
+            #     pic_name='low_confidence_patches_iter_{}.png'.format(iter_num),
+            # )
+            viz = PatchVisualizer(N=16, n=4)
+            viz.visualize(out_l_fg[0], net_input_l[0])
+            
             sys.exit()
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
@@ -618,6 +675,185 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             iterator.close()
             break
     writer.close()
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
+class PatchVisualizer:
+    def __init__(self, N: int, n: int):
+        """
+        PatchVisualizer 类：可视化模型输出中置信度最低的 patch
+
+        参数:
+            N: int
+               将图像划分为 N×N 个 patch
+            n: int
+               选择置信度最低的 n 个 patch 进行高亮标注
+        """
+        self.N = N
+        self.n = n
+
+    def _compute_pseudo_and_conf(self, output: torch.Tensor, b_idx: int = 0):
+        """
+        从模型输出计算伪标签图和置信度图
+
+        输入参数:
+            output: torch.Tensor, 形状 (B, C, H, W)
+                - B: batch size
+                - C: 类别数
+                - H: 图像高度
+                - W: 图像宽度
+            b_idx: int
+                - 要处理的 batch 索引 (默认 0)
+
+        返回:
+            pseudo_label: torch.LongTensor, 形状 (H, W)
+                - 每个像素的预测类别索引
+            conf_map: torch.FloatTensor, 形状 (H, W)
+                - 每个像素的预测置信度（属于预测类别的最大概率）
+        """
+        probs = F.softmax(output[b_idx:b_idx+1], dim=1)  # (1, C, H, W)
+        conf_map, pseudo_label = probs.max(dim=1)        # (1, H, W)
+        return pseudo_label.squeeze(0), conf_map.squeeze(0)
+
+    def _compute_grid_edges(self, H: int, W: int):
+        """
+        计算网格划分的行列边界
+
+        输入参数:
+            H: int
+               图像高度
+            W: int
+               图像宽度
+
+        返回:
+            row_edges: np.ndarray, 形状 (N+1,)
+                - 行方向的边界坐标 (像素索引)，用于划分 N 行
+            col_edges: np.ndarray, 形状 (N+1,)
+                - 列方向的边界坐标 (像素索引)，用于划分 N 列
+        """
+        row_edges = np.linspace(0, H, self.N + 1, dtype=int)
+        col_edges = np.linspace(0, W, self.N + 1, dtype=int)
+        return row_edges, col_edges
+
+    def _patch_confidence_matrix(self, conf_map: torch.Tensor):
+        """
+        计算每个 patch 的平均置信度
+
+        输入参数:
+            conf_map: torch.FloatTensor, 形状 (H, W)
+                - 每个像素点的最大类别置信度
+
+        返回:
+            conf_mat: torch.FloatTensor, 形状 (N, N)
+                - 每个 patch 的平均置信度
+            row_edges: np.ndarray, 形状 (N+1,)
+                - 行方向的边界索引
+            col_edges: np.ndarray, 形状 (N+1,)
+                - 列方向的边界索引
+        """
+        H, W = conf_map.shape
+        row_edges, col_edges = self._compute_grid_edges(H, W)
+
+        conf_mat = torch.empty((self.N, self.N), dtype=conf_map.dtype)
+        for r in range(self.N):
+            rs, re = row_edges[r], row_edges[r+1]
+            for c in range(self.N):
+                cs, ce = col_edges[c], col_edges[c+1]
+                conf_mat[r, c] = conf_map[rs:re, cs:ce].mean()
+        return conf_mat, row_edges, col_edges
+
+    def _lowest_confidence_patches(self, conf_mat: torch.Tensor):
+        """
+        选出置信度最低的 n 个 patch
+
+        输入参数:
+            conf_mat: torch.FloatTensor, 形状 (N, N)
+                - 每个 patch 的平均置信度
+
+        返回:
+            low_patches: list(dict)
+                - 列表长度 = n
+                - 每个元素是字典，包含:
+                    {
+                        'r': int, patch 的行索引 [0, N-1],
+                        'c': int, patch 的列索引 [0, N-1],
+                        'score': float, 该 patch 的平均置信度
+                    }
+        """
+        flat = conf_mat.flatten()
+        k = min(self.n, flat.numel())
+        vals, idxs = torch.topk(-flat, k)  # 取负再 topk = 取最小值
+        out = []
+        for idx, v in zip(idxs, vals):
+            r, c = divmod(int(idx), self.N)
+            out.append({'r': r, 'c': c, 'score': float(-v.item())})
+        return out
+
+    def visualize(self, output: torch.Tensor, image: torch.Tensor, b_idx: int = 0):
+        """
+        在原图上可视化置信度最低的 n 个 patch
+
+        输入参数:
+            output: torch.Tensor, 形状 (B, C, H, W)
+                - 模型输出 (logits 或者概率)
+            image: torch.Tensor, 形状 (H, W) 或 (3, H, W)
+                - 原始输入图像，取值范围 [0,1] 或 [0,255]
+            b_idx: int
+                - 处理第几个 batch 样本
+
+        输出:
+            None
+            - 使用 Matplotlib 绘制可视化图像
+            - 原图被划分为 N×N 网格
+            - 置信度最低的 n 个 patch 被红框和半透明红色覆盖标注
+            - 框中央标注 patch 平均置信度值
+        """
+        pseudo, conf_map = self._compute_pseudo_and_conf(output, b_idx)
+        conf_mat, row_edges, col_edges = self._patch_confidence_matrix(conf_map)
+        low_patches = self._lowest_confidence_patches(conf_mat)
+
+        # 转 numpy (支持 [3, H, W] 格式)
+        if image.dim() == 3 and image.shape[0] in (1, 3):  
+            img_np = image.permute(1, 2, 0).cpu().numpy()
+        else:
+            img_np = image.cpu().numpy()
+        if img_np.max() > 1:  # 转换到 [0,1]
+            img_np = img_np / 255.0
+
+        H, W = conf_map.shape
+        fig, ax = plt.subplots(figsize=(8, 8 * H / W))
+        ax.imshow(img_np, origin='upper')
+        ax.set_title(f"Lowest {self.n} patches (N={self.N})")
+        ax.set_axis_off()
+
+        # 画网格线
+        for x in col_edges:
+            ax.axvline(x, color='white', linewidth=0.8)
+        for y in row_edges:
+            ax.axhline(y, color='white', linewidth=0.8)
+
+        # 高亮 patch
+        for p in low_patches:
+            r, c, score = p['r'], p['c'], p['score']
+            x0, x1 = col_edges[c], col_edges[c+1]
+            y0, y1 = row_edges[r], row_edges[r+1]
+            w, h = x1 - x0, y1 - y0
+            rect = Rectangle((x0, y0), w, h,
+                             linewidth=2, edgecolor='red',
+                             facecolor='red', alpha=0.3)
+            ax.add_patch(rect)
+            ax.text(x0+w/2, y0+h/2, f"{score:.3f}",
+                    color='white', ha='center', va='center', fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.6))
+
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        plt.tight_layout()
+        plt.show()
 
 
 if __name__ == "__main__":
