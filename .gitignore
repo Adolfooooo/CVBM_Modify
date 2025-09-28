@@ -4,7 +4,6 @@
 *.pth
 *copytest*
 __init__.py
-run_py*.sh
 record_train.txt
 
 # folder
