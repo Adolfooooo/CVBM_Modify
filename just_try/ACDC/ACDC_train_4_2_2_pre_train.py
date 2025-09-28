@@ -559,7 +559,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
-            pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4))
+            pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose_largest=True)
             # 现在形状满足你的要求：
             #   pos_patches: [B, 16, C] 作为正样本（低置信度）
             #   neg_patches: [B, L-16, C] 作为负样本
