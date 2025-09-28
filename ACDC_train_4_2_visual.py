@@ -28,7 +28,7 @@ from visual_ACDC import ModelVisualizer
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
@@ -44,12 +44,12 @@ parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_si
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
-parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
 parser.add_argument('--consistency', type=float, default=0.1, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_2/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_ACDC_4_2/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -581,10 +581,10 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             # loss =loss_dice + loss_ce + consistency_weight * bclloss
 
             ### visualization
-            # visualizer.visualize_prediction(
-            #     image_sample={"image":net_input_l[0], 'label': l_label[0]},
-            #     features=out_l_fg[0]
-            #     )
+            visualizer.visualize_prediction(
+                image_sample={"image":net_input_l[0], 'label': l_label[0]},
+                features=out_l_fg[0]
+                )
             # visualizer.visualiza_patch_in_pic_version1(
             #     image_sample={"image":net_input_l[0], 'label': l_label[0]},
             #     features=out_l_fg[0],
@@ -592,8 +592,8 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             #     grid_size=topnum,
             #     pic_name='low_confidence_patches_iter_{}.png'.format(iter_num),
             # )
-            viz = PatchVisualizer(N=16, n=4)
-            viz.visualize(out_l_fg[0], net_input_l[0])
+            viz = PatchVisualizer(N=32, n=64)
+            viz.visualize(out_l_fg, torch.concat([net_input_l[0], net_input_l[0], net_input_l[0]], dim=0))
             
             sys.exit()
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
@@ -607,66 +607,7 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             iter_num += 1
             update_model_ema(model, ema_model, 0.99)
 
-            # writer.add_scalar('info/total_loss', loss, iter_num)
-            # writer.add_scalar('info/mix_dice', loss_dice, iter_num)
-            # writer.add_scalar('info/mix_ce', loss_ce, iter_num)
-            # writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
-
-            # logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
-
-            # if iter_num % 20 == 0:
-            #     image = net_input_unl[1, 0:1, :, :]
-            #     writer.add_image('train/Un_Image', image, iter_num)
-            #     outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
-            #     writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
-            #     labs = unl_label[1, ...].unsqueeze(0) * 50
-            #     writer.add_image('train/Un_GroundTruth', labs, iter_num)
-
-            #     image_l = net_input_l[1, 0:1, :, :]
-            #     writer.add_image('train/L_Image', image_l, iter_num)
-            #     outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
-            #     writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
-            #     labs_l = l_label[1, ...].unsqueeze(0) * 50
-            #     writer.add_image('train/L_GroundTruth', labs_l, iter_num)
-
-            # if iter_num > 0 and iter_num % 200 == 0:
-            #     model.eval()
-            #     ema_model.eval()
-            #     metric_list = 0.0
-            #     ema_metric_list = 0.0
-            #     for _, sampled_batch in enumerate(valloader):
-            #         metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
-            #                                              classes=num_classes)
-            #         ema_metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], ema_model,
-            #                                              classes=num_classes)
-            #         metric_list += np.array(metric_i)
-            #         ema_metric_list += np.array(ema_metric_i)
-            #     metric_list = metric_list / len(db_val)
-            #     for class_i in range(num_classes - 1):
-            #         writer.add_scalar('info/val_{}_dice'.format(class_i + 1), metric_list[class_i, 0], iter_num)
-            #         writer.add_scalar('info/val_{}_hd95'.format(class_i + 1), metric_list[class_i, 1], iter_num)
-
-            #     performance = np.mean(metric_list, axis=0)[0]
-            #     ema_performance = np.mean(ema_metric_list, axis=0)[0]
-                
-            #     writer.add_scalar('info/val_mean_dice', performance, iter_num)
-
-            #     if performance > best_performance:
-            #         best_performance = performance
-            #         save_mode_path = os.path.join(snapshot_path,
-            #                                       'iter_{}_dice_{}.pth'.format(iter_num, round(best_performance, 4)))
-            #         save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
-            #         torch.save(model.state_dict(), save_mode_path)
-            #         torch.save(model.state_dict(), save_best_path)
-            #     if ema_performance > ema_best_performance:
-            #         ema_best_performance = ema_performance
-            #         ema_save_mode_path = os.path.join(snapshot_path,
-            #                                       'iter_ema_{}_dice_{}.pth'.format(iter_num, round(ema_best_performance, 4)))
-            #         ema_save_best_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
-            #         torch.save(model.state_dict(), ema_save_mode_path)
-            #         torch.save(model.state_dict(), ema_save_best_path)
-            #     logging.info('iteration %d : mean_dice : %f' % (iter_num, performance))
-            #     logging.info('iteration %d : mean_dice : %f' % (iter_num, ema_performance))
+            
                 
 
             if iter_num >= max_iterations:
@@ -786,14 +727,51 @@ class PatchVisualizer:
         """
         flat = conf_mat.flatten()
         k = min(self.n, flat.numel())
-        vals, idxs = torch.topk(-flat, k)  # 取负再 topk = 取最小值
+        vals, idxs = torch.topk(flat, k, largest=False)  # 取负再 topk = 取最小值
         out = []
         for idx, v in zip(idxs, vals):
             r, c = divmod(int(idx), self.N)
             out.append({'r': r, 'c': c, 'score': float(-v.item())})
         return out
 
-    def visualize(self, output: torch.Tensor, image: torch.Tensor, b_idx: int = 0):
+    def _prepare_image(self, image: torch.Tensor):
+        """
+        处理输入图像，转换为 numpy 格式，数值范围 [0,255] uint8
+
+        输入参数:
+            image: torch.Tensor
+                - 形状可以是 (H, W), (1, H, W), (3, H, W), (H, W, 3)
+                - 数值范围 [0,1] 或 [0,255]
+
+        返回:
+            img_np: np.ndarray, 形状 (H, W) 或 (H, W, 3)
+                - 转换后的 numpy 数组，范围 [0,255]，类型 uint8
+        """
+        if isinstance(image, torch.Tensor):
+            arr = image.detach().cpu()
+        else:
+            arr = torch.as_tensor(image)
+
+        # 如果是 (1, H, W) -> (H, W)
+        if arr.dim() == 3 and arr.shape[0] == 1:
+            arr = arr.squeeze(0)
+
+        # 如果是 (3, H, W) -> (H, W, 3)
+        if arr.dim() == 3 and arr.shape[0] == 3:
+            arr = arr.permute(1, 2, 0)
+
+        # 如果是 (H, W)，直接保留
+        # 如果是 (H, W, 3)，直接保留
+        if arr.dim() not in (2, 3):
+            raise ValueError(f"Unsupported image shape {arr.shape}")
+
+        arr = arr.float()
+        if arr.max() <= 1.0:
+            arr = arr * 255.0
+
+        arr = arr.clamp(0, 255).byte().numpy()
+        return arr
+    def visualize(self, output: torch.Tensor, image: torch.Tensor, b_idx: int = 0, save_path: str=None):
         """
         在原图上可视化置信度最低的 n 个 patch
 
@@ -816,13 +794,7 @@ class PatchVisualizer:
         conf_mat, row_edges, col_edges = self._patch_confidence_matrix(conf_map)
         low_patches = self._lowest_confidence_patches(conf_mat)
 
-        # 转 numpy (支持 [3, H, W] 格式)
-        if image.dim() == 3 and image.shape[0] in (1, 3):  
-            img_np = image.permute(1, 2, 0).cpu().numpy()
-        else:
-            img_np = image.cpu().numpy()
-        if img_np.max() > 1:  # 转换到 [0,1]
-            img_np = img_np / 255.0
+        img_np = self._prepare_image(image)
 
         H, W = conf_map.shape
         fig, ax = plt.subplots(figsize=(8, 8 * H / W))
@@ -853,7 +825,13 @@ class PatchVisualizer:
         ax.set_xlim(0, W)
         ax.set_ylim(H, 0)
         plt.tight_layout()
-        plt.show()
+        
+        # 自动保存
+        if save_path is None:
+            os.makedirs("images", exist_ok=True)
+            save_path = os.path.join("images", "lowest_conf_patches.png")
+        plt.savefig(save_path, dpi=150)
+        print(f"✅ 保存结果到: {save_path}")
 
 
 if __name__ == "__main__":

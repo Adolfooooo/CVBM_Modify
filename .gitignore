@@ -14,5 +14,6 @@ record_train.txt
 **/.git/
 **/.ipynb_checkpoints/
 **/images/
+**/.vscode/
 
 
