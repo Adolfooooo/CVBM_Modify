@@ -384,7 +384,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
 
-            pos_patches, neg_patches = select_patches_for_contrast_3d(output_mix_bg_fg, topnum=16, patch_size=(4, 4, 4), choose_largest=True)
+            pos_patches, neg_patches = select_patches_for_contrast_3d(output_mix_bg_fg, topnum=440, patch_size=(4, 4, 10), choose_largest=False)
             bclloss = BCLLoss(pos_patches, neg_patches)
 
             loss =loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * bclloss
