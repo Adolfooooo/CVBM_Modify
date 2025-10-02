@@ -94,7 +94,7 @@ def var_all_case_Pancreas(model, num_classes, patch_size=(96, 96, 96), stride_xy
     assert type(dataset_path) is str
     with open(dataset_path + '/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = [dataset_path + '/Pancreas_h5/' + item.replace('\n', '') + "_norm.h5" for item in image_list]
+    image_list = [dataset_path + '/data/' + item.replace('\n', '') + "_norm.h5" for item in image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
     for image_path in loader:
@@ -116,7 +116,7 @@ def var_all_case_Pancreas_argument(model, num_classes, patch_size=(96, 96, 96), 
     assert type(dataset_path) is str
     with open(dataset_path + '/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = [dataset_path + '/Pancreas_h5/' + item.replace('\n', '') + "_norm.h5" for item in image_list]
+    image_list = [dataset_path + '/data/' + item.replace('\n', '') + "_norm.h5" for item in image_list]
     loader = tqdm(image_list)
     total_dice = 0.0
     for image_path in loader:
