@@ -115,6 +115,45 @@ if args.deterministic:
 patch_size = (96, 96, 96)
 num_classes = 2
 
+def select_patches_for_contrast_3d(output_mix, topnum=16, patch_size=(4, 4, 4), choose_largest=False):
+    """
+    output_mix: [B, C, H, W, D] (e.g. 3D segmentation logits)
+    返回:
+      pos_patches: [B, topnum, C]
+      neg_patches: [B, L-topnum, C]
+    """
+    B, C, H, W, D = output_mix.shape
+    ph, pw, pd = patch_size
+    assert H % ph == 0 and W % pw == 0 and D % pd == 0, "H/W/D 必须能被 patch_size 整除"
+
+    # 1) softmax 概率 + 置信度
+    probs = F.softmax(output_mix, dim=1)                # [B, C, H, W, D]
+    score = probs.max(dim=1, keepdim=True).values       # [B, 1, H, W, D]
+
+    # 2) 用 avg_pool3d 得到每个 patch 的均值置信度
+    patch_conf = F.avg_pool3d(score, kernel_size=(ph, pw, pd), stride=(ph, pw, pd))  # [B, 1, H/ph, W/pw, D/pd]
+    patch_conf = patch_conf.flatten(1)   # [B, L], L=patch_num
+
+    # 3) 选取 topnum patch index
+    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)  # [B, topnum]
+    B_, L = patch_conf.shape
+    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)
+    mask = torch.ones_like(all_idx, dtype=torch.bool)
+    mask.scatter_(1, top_idx, False)   # 正样本位置设为 False
+    num_neg = L - topnum
+
+    # 4) 提取每个 patch 的特征（用 avg_pool3d）
+    feat_patches = F.avg_pool3d(probs, kernel_size=(ph, pw, pd), stride=(ph, pw, pd))  # [B, C, H/ph, W/pw, D/pd]
+    feat_patches = feat_patches.flatten(2).permute(0, 2, 1).contiguous()  # [B, L, C]
+
+    # 5) 正负样本提取
+    pos_patches = torch.gather(
+        feat_patches, dim=1,
+        index=top_idx.unsqueeze(-1).expand(-1, -1, C)   # [B, topnum, C]
+    )
+    neg_patches = feat_patches[mask].view(B, num_neg, C)
+
+    return pos_patches, neg_patches
 
 def pre_train(args, snapshot_path):
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
