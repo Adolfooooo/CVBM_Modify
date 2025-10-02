@@ -136,34 +136,53 @@ def Inference(args):
         shutil.rmtree(test_save_path)
     os.makedirs(test_save_path)
     net = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes)
+    ema_net = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes)
     save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+    ema_model_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
     net.load_state_dict(torch.load(save_model_path))
-
+    ema_net.load_state_dict(torch.load(ema_model_path))
+    
     print("init weight from {}".format(save_model_path))
+    print("init weight from {}".format(ema_model_path))
     net.eval()
+    ema_net.eval()
 
     first_total = 0.0
     second_total = 0.0
     third_total = 0.0
+    ema_first_total = 0.0
+    ema_second_total = 0.0
+    ema_third_total = 0.0
+    
     for case in tqdm(image_list):
         if args.model == "CVBM2d":
             first_metric, second_metric, third_metric = test_single_volume(case, net, test_save_path, args)
+            ema_first_metric, ema_second_metric, ema_third_metric = test_single_volume(case, net, test_save_path, args)
         elif args.model == "CVBM2d_Argument":
             first_metric, second_metric, third_metric = test_single_volume_argument(case, net, test_save_path, args)
+            ema_first_metric, ema_second_metric, ema_third_metric = test_single_volume_argument(case, ema_net, test_save_path, args)
             
         first_total += np.asarray(first_metric)
         second_total += np.asarray(second_metric)
         third_total += np.asarray(third_metric)
+        ema_first_total += np.asarray(ema_first_metric)
+        ema_second_total += np.asarray(ema_second_metric)
+        ema_third_total += np.asarray(ema_third_metric)
     avg_metric = [first_total / len(image_list), second_total / len(image_list), third_total / len(image_list)]
-    return avg_metric, test_save_path
+    avg_ema_metric = [ema_first_total / len(image_list), ema_second_total / len(image_list), ema_third_total / len(image_list)]
+    return avg_metric, test_save_path, avg_ema_metric
 
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    metric, test_save_path = Inference(args)
+    metric, test_save_path, ema_metric = Inference(args)
     print(metric)
-    print((metric[0]+metric[1]+metric[2])/3)
+    print(ema_metric)
+    print(f'train_model: {(metric[0]+metric[1]+metric[2])/3}')
+    print(f'ema_model: {(ema_metric[0]+ema_metric[1]+ema_metric[2])/3}')
     with open(test_save_path+'../performance.txt', 'w') as f:
         f.writelines('metric is {} \n'.format(metric))
         f.writelines('average metric is {}\n'.format((metric[0]+metric[1]+metric[2])/3))
+        f.writelines('ema metric is {} \n'.format(ema_metric))
+        f.writelines('ema average metric is {}\n'.format((ema_metric[0]+ema_metric[1]+ema_metric[2])/3))
