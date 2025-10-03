@@ -4,7 +4,7 @@ import torch
 import pdb
 
 from networks.net_factory import net_factory
-from utils.test_3d_patch import test_all_case
+from utils.test_3d_patch import test_all_case, test_all_case_argument
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Experiment')
@@ -45,14 +45,24 @@ def test_calculate_metric():
     model.eval()
     ema_model.eval()
 
-    avg_metric = test_all_case(model, image_list, num_classes=num_classes,
-                           patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
-                           save_result=False, test_save_path=test_save_path,
-                           metric_detail=args.detail, nms=args.nms)
-    avg_ema_metric = test_all_case(ema_model, image_list, num_classes=num_classes,
-                           patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
-                           save_result=False, test_save_path=test_save_path,
-                           metric_detail=args.detail, nms=args.nms)
+    if args.model == "CVBM":
+        avg_metric = test_all_case(model, image_list, num_classes=num_classes,
+                            patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
+                            save_result=False, test_save_path=test_save_path,
+                            metric_detail=args.detail, nms=args.nms)
+        avg_ema_metric = test_all_case(ema_model, image_list, num_classes=num_classes,
+                            patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
+                            save_result=False, test_save_path=test_save_path,
+                            metric_detail=args.detail, nms=args.nms)
+    elif args.model == "CVBM_Argument":
+        avg_metric = test_all_case_argument(model, image_list, num_classes=num_classes,
+                            patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
+                            save_result=False, test_save_path=test_save_path,
+                            metric_detail=args.detail, nms=args.nms)
+        avg_ema_metric = test_all_case_argument(ema_model, image_list, num_classes=num_classes,
+                            patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
+                            save_result=False, test_save_path=test_save_path,
+                            metric_detail=args.detail, nms=args.nms)
     
     return avg_metric, avg_ema_metric
 
