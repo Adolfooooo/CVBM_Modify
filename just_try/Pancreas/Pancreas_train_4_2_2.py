@@ -302,6 +302,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     logging.info("{} itertations per epoch".format(len(trainloader)))
     iter_num = 0
     best_dice = 0
+    ema_best_dice = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
     lr_ = base_lr
     iterator = tqdm(range(max_epoch), ncols=70)
@@ -408,6 +409,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas_argument(model, num_classes=num_classes, patch_size=patch_size,
                                                                   stride_xy=16, stride_z=16, dataset_path=args.root_path)
+                ema_dice_sample = test_3d_patch.var_all_case_Pancreas_argument(model, num_classes=num_classes, patch_size=patch_size,
+                                                                  stride_xy=16, stride_z=16, dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
                     save_mode_path = os.path.join(self_snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
@@ -417,8 +420,18 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
                     logging.info("save best model to {}".format(save_mode_path))
-                writer.add_scalar('4_Var_dice/Dice', dice_sample, iter_num)
-                writer.add_scalar('4_Var_dice/Best_dice', best_dice, iter_num)
+                
+                if ema_dice_sample > ema_best_dice:
+                    ema_best_dice = round(ema_dice_sample, 4)
+                    save_mode_path = os.path.join(self_snapshot_path, 'iter_ema_{}_dice_{}.pth'.format(iter_num, ema_best_dice))
+                    save_best_path = os.path.join(self_snapshot_path, '{}_ema_best_model.pth'.format(args.model))
+                    # save_net_opt(model, optimizer, save_mode_path)
+                    # save_net_opt(model, optimizer, save_best_path)
+                    torch.save(ema_model.state_dict(), save_mode_path)
+                    torch.save(ema_model.state_dict(), save_best_path)
+                    logging.info("save best EMA  model to {}".format(save_mode_path))
+                writer.add_scalar('4_ema_Var_dice/Dice', ema_dice_sample, iter_num)
+                writer.add_scalar('4_ema_Var_dice/Best_dice', ema_best_dice, iter_num)
                 model.train()
 
             if iter_num % 200 == 1:
