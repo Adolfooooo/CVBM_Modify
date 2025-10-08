@@ -1,11 +1,11 @@
 # files
-**/*.log
-*.pyc
-*.pth
-*copytest*
+**/** */.log
+**.pyc
+**.pth
+**copytest**
 __init__.py
 record_train.txt
-run_*.sh
+run_**.sh
 
 # folder
 **/results/
