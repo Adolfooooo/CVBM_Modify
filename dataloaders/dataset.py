@@ -167,7 +167,53 @@ class Pancreas(Dataset):
 
         return sample
 
+class Synapse(Dataset):
+    def __init__(self, base_dir, file_name='train', transform=None, num=None, selected_idxs=None):
+        self.transform = transform
+        # self.strong_transform = strong_transform
+        self._base_dir = base_dir
+        self.file_name = file_name
 
+        file_path = self._base_dir + '/../' + file_name + '.txt'
+        print(file_path)
+        with open(file_path, 'r') as f:
+            self.image_list = f.readlines()
+        self.image_list = [item.replace('\n', '') for item in self.image_list]
+        if num is not None:
+            self.image_list = self.image_list[:num]
+
+        if selected_idxs is not None:
+            total = list(range(len(self.image_list)))
+            excluded_idxs = [x for x in total if x not in selected_idxs]
+            for exclude_id in reversed(sorted(excluded_idxs)):
+                self.image_list.pop(exclude_id)
+
+        print("total {} samples".format(len(self.image_list)))
+
+    def __len__(self):
+        return len(self.image_list)
+
+    def __getitem__(self, idx):
+        image_name = self.image_list[idx].strip('\n')
+        if self.file_name == "train":
+            data = np.load(os.path.join(self._base_dir, image_name + '.npz'))
+            image, label = data['image'], data['label']
+        elif self.file_name == "test_vol":
+            filepath = self._base_dir + "/{}.npy.h5".format(image_name)
+            data = h5py.File(filepath)
+            image, label = data['image'][:], data['label'][:]
+
+        sample = {'image': image, 'label': label}
+        if self.transform:
+            sample = self.transform(sample)
+        # if self.strong_transform:
+        #     raw_img = torch.from_numpy(sample['image'].astype(np.float32)).unsqueeze(0)
+        #     sample_strong = self.strong_transform(sample)
+        #     sample['strong_aug'] = sample_strong['image']
+        #     sample['image'] = raw_img
+        #     sample['label'] = torch.from_numpy(sample['label']).long()
+        # sample['name'] = image_name
+        return sample
 
 class Resize(object):
 
