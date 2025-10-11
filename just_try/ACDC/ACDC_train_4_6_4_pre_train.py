@@ -28,7 +28,7 @@ from utils.dynamic_threhold.plo import PseudoLabelOptimizer
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
@@ -546,8 +546,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    # load_net(ema_model, pre_trained_model)
-    # load_net_opt(model, optimizer, pre_trained_model)
+    load_net(ema_model, pre_trained_model)
+    load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -629,10 +629,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             
             # out_mix_a_fg,out_mix_a_fgbg, out_mix_a_s_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_mix_a_fg,out_mix_a_fgbg, out_mix_a_s_bg, _, _ = model(input_mix_a, input_mix_a_s)
+            out_mix_a_fg, out_mix_a_fgbg, out_mix_a_s_bg, _, _ = model(input_mix_a, input_mix_a_s)
             # out_mix_b_fg,out_mix_b_fgbg, out_mix_b_s_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_mix_b_fg,out_mix_b_fgbg, out_mix_b_s_bg, _, _ = model(input_mix_b, input_mix_b_s)
+            out_mix_b_fg, out_mix_b_fgbg, out_mix_b_s_bg, _, _ = model(input_mix_b, input_mix_b_s)
 
             # conv 3x3 connect
             output_mix = torch.cat([out_mix_a_fgbg, out_mix_b_fgbg], dim=0)
@@ -661,8 +661,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_mix_b = pseudo_label_optimizer.calculate_loss(pse_mix_b, pseudo_label_mix_b, mask_mix_b_confident, mask_mix_b_hesitant)
             # loss_mix_a_s = pseudo_label_optimizer.calculate_loss(out_mix_a_s_bg, pseudo_label_mix_a_s, mask_mix_a_s_confident, mask_mix_a_s_hesitant)
             # loss_mix_b_s = pseudo_label_optimizer.calculate_loss(out_mix_b_s_bg, pseudo_label_mix_b_s, mask_mix_b_s_confident, mask_mix_b_s_hesitant)
-            loss_hesitant_pse = (loss_mix_a + loss_mix_b) * 0.001
-
+            loss_hesitant_pse = (loss_mix_a + loss_mix_b) / 2.0
 
             # contrastive learning of negative patches
             pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=64, patch_size=(8, 8))
@@ -773,7 +772,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,

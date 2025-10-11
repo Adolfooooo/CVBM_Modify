@@ -15,6 +15,10 @@ class PseudoLabelOptimizer(nn.Module):
         return confident, hesitant, scrap
     
     def calculate_loss(self, predictions, labels, confident_mask, hesitant_mask):
-        loss_confident = nn.functional.mse_loss(predictions[confident_mask], labels[confident_mask])
-        loss_hesitant = nn.functional.smooth_l1_loss(predictions[hesitant_mask], labels[hesitant_mask])
+        loss_confident, loss_hesitant= 0, 0
+        if confident_mask.sum() > 0:
+            loss_confident = nn.functional.mse_loss(predictions[confident_mask], labels[confident_mask])
+        if hesitant_mask.sum() > 0:
+            loss_hesitant = nn.functional.smooth_l1_loss(predictions[hesitant_mask], labels[hesitant_mask])
+        
         return loss_confident + loss_hesitant
