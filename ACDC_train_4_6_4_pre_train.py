@@ -24,6 +24,7 @@ from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSa
 from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
 from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
+from utils.dynamic_threhold.plo import PseudoLabelOptimizer
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
@@ -48,7 +49,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_7/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_4_pre_train/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -170,7 +171,7 @@ def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
     return indices
 
 
-def get_ACDC_masks_with_confidence_dynamic(output, dynamic_threhold_updater, nms=0, onehot=False):
+def get_ACDC_masks_with_confidence_dynamic(output , dynamic_threhold_updater, nms=0, onehot=False):
     probs = F.softmax(output, dim=1)
     probs, indices = torch.max(probs, dim=1)
     dynamic_threshold_class = dynamic_threhold_updater.update_threshold(class_num=4, dynamic_thresholds=dynamic_threshold_class, alpha=0.99)
@@ -438,8 +439,8 @@ def pre_train(args, snapshot_path):
 
             img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
             lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
-            onehot_lab_a, onehot_lab_b = onehot_label_batch[:labeled_sub_bs] == 1, onehot_label_batch[
-                                                                                   labeled_sub_bs:args.labeled_bs] == 1
+            onehot_lab_a, onehot_lab_b = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
+                                                                                   labeled_sub_bs:args.labeled_bs] == 0
             img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
             gt_mixl = lab_a * img_mask + lab_b * (1 - img_mask)
             onehot_gt_mixl = onehot_lab_a * img_mask + onehot_lab_b * (1 - img_mask)
@@ -545,8 +546,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    load_net(ema_model, pre_trained_model)
-    load_net_opt(model, optimizer, pre_trained_model)
+    # load_net(ema_model, pre_trained_model)
+    # load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -556,6 +557,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
     ce_loss = CrossEntropyLoss()
+    pseudo_label_optimizer = PseudoLabelOptimizer()
 
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
@@ -583,16 +585,16 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             ulab_a, ulab_b = label_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch[
                                                                                                 args.labeled_bs + unlabeled_sub_bs:]
             lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
-            lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 1, onehot_label_batch[
-                                                                            labeled_sub_bs:args.labeled_bs] == 1
+            lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
+                                                                            labeled_sub_bs:args.labeled_bs] == 0
 
             img_a_s, img_b_s = volume_batch_strong[:labeled_sub_bs], volume_batch_strong[labeled_sub_bs:args.labeled_bs]
             uimg_a_s, uimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch_strong[args.labeled_bs + unlabeled_sub_bs:]
             ulab_a_s, ulab_b_s = label_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch_strong[
                                                                                                 args.labeled_bs + unlabeled_sub_bs:]
             lab_a_s, lab_b_s = label_batch_strong[:labeled_sub_bs], label_batch_strong[labeled_sub_bs:args.labeled_bs]
-            lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 1, onehot_label_batch_strong[
-                                                                            labeled_sub_bs:args.labeled_bs] == 1
+            lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 0, onehot_label_batch_strong[
+                                                                            labeled_sub_bs:args.labeled_bs] == 0
             
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
@@ -607,44 +609,69 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
                 l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
+
             consistency_weight = get_current_consistency_weight(iter_num // 150)
-            # net_input_unl, net_input_l
+            # input_mix_a, input_mix_b
             # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
-            net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
-            net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
-            net_input = torch.cat([net_input_unl, net_input_l], dim=0)
+            input_mix_a = uimg_a * img_mask + img_a * (1 - img_mask)
+            input_mix_b = img_b * img_mask + uimg_b * (1 - img_mask)
+            net_input = torch.cat([input_mix_a, input_mix_b], dim=0)
 
-            net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
-            net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
-            net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
+            input_mix_a_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
+            input_mix_b_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
+            net_input_s = torch.cat([input_mix_a_s, input_mix_b_s], dim=0)
 
-            # out_unl_fg,out_unl, out_unl_bg
+            # pseudo label
+            pseudo_label_mix_a = plab_a_fg * img_mask + lab_a * (1 - img_mask)
+            pseudo_label_mix_b = lab_b * img_mask + plab_b_fg * (1 - img_mask)
+            pseudo_label_mix_a_s = plab_a_bg_s * onehot_mask + lab_a_bg_s * (1 - onehot_mask)
+            pseudo_label_mix_b_s = lab_b_bg_s * onehot_mask + plab_b_bg_s * (1 - onehot_mask)
+            
+            # out_mix_a_fg,out_mix_a_fgbg, out_mix_a_s_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
-            # out_l_fg,out_l, out_l_bg
+            out_mix_a_fg,out_mix_a_fgbg, out_mix_a_s_bg, _, _ = model(input_mix_a, input_mix_a_s)
+            # out_mix_b_fg,out_mix_b_fgbg, out_mix_b_s_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
+            out_mix_b_fg,out_mix_b_fgbg, out_mix_b_s_bg, _, _ = model(input_mix_b, input_mix_b_s)
 
             # conv 3x3 connect
-            output_mix = torch.cat([out_unl, out_l], dim=0)
+            output_mix = torch.cat([out_mix_a_fgbg, out_mix_b_fgbg], dim=0)
 
-            unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
-            l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
+            unl_dice, unl_ce = mix_loss(out_mix_a_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
+            l_dice, l_ce = mix_loss(out_mix_b_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
-            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg_s, lab_a_bg_s, onehot_mask,
+            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_mix_a_s_bg, plab_a_bg_s, lab_a_bg_s, onehot_mask,
                                                         u_weight=args.u_weight, unlab=True)
-            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
+            l_dice_bg, l_ce_bg = onehot_mix_loss(out_mix_b_s_bg, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
 
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
+            # 
+            mask_mix_a_confident, mask_mix_a_hesitant, _ = pseudo_label_optimizer(pseudo_label_mix_a)
+            mask_mix_b_confident, mask_mix_b_hesitant, _ = pseudo_label_optimizer(pseudo_label_mix_b)
+            # mask_mix_a_s_confident, mask_mix_a_s_hesitant, _ = \
+            # pseudo_label_optimizer(create_onehot.OneHotConverter.to_label(pseudo_label_mix_a_s))
+            # mask_mix_b_s_confident, mask_mix_b_s_hesitant, _ = \
+            # pseudo_label_optimizer(create_onehot.OneHotConverter.to_label(pseudo_label_mix_b_s))
+
+            pse_mix_a = torch.argmax(torch.softmax(out_mix_a_fg, dim=1), dim=1)
+            pse_mix_b = torch.argmax(torch.softmax(out_mix_b_fg, dim=1), dim=1)
+            loss_mix_a = pseudo_label_optimizer.calculate_loss(pse_mix_a, pseudo_label_mix_a, mask_mix_a_confident, mask_mix_a_hesitant)
+            loss_mix_b = pseudo_label_optimizer.calculate_loss(pse_mix_b, pseudo_label_mix_b, mask_mix_b_confident, mask_mix_b_hesitant)
+            # loss_mix_a_s = pseudo_label_optimizer.calculate_loss(out_mix_a_s_bg, pseudo_label_mix_a_s, mask_mix_a_s_confident, mask_mix_a_s_hesitant)
+            # loss_mix_b_s = pseudo_label_optimizer.calculate_loss(out_mix_b_s_bg, pseudo_label_mix_b_s, mask_mix_b_s_confident, mask_mix_b_s_hesitant)
+            loss_hesitant_pse = (loss_mix_a + loss_mix_b) * 0.001
+
+
+            # contrastive learning of negative patches
             pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=64, patch_size=(8, 8))
             # 现在形状满足你的要求：
             #   pos_patches: [B, 16, C] 作为正样本（低置信度）
             #   neg_patches: [B, L-16, C] 作为负样本
             bclloss = BCLLoss(pos_patches, neg_patches)
 
-            loss = loss_dice + loss_ce + consistency_weight * bclloss
+            loss = loss_dice + loss_ce + consistency_weight * bclloss + loss_hesitant_pse
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             optimizer.zero_grad()
@@ -662,16 +689,16 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
             if iter_num % 20 == 0:
-                image = net_input_unl[1, 0:1, :, :]
+                image = input_mix_a[1, 0:1, :, :]
                 writer.add_image('train/Un_Image', image, iter_num)
-                outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
+                outputs = torch.argmax(torch.softmax(out_mix_a_fgbg, dim=1), dim=1, keepdim=True)
                 writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
                 labs = unl_label[1, ...].unsqueeze(0) * 50
                 writer.add_image('train/Un_GroundTruth', labs, iter_num)
 
-                image_l = net_input_l[1, 0:1, :, :]
+                image_l = input_mix_b[1, 0:1, :, :]
                 writer.add_image('train/L_Image', image_l, iter_num)
-                outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
+                outputs_l = torch.argmax(torch.softmax(out_mix_b_fgbg, dim=1), dim=1, keepdim=True)
                 writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
                 labs_l = l_label[1, ...].unsqueeze(0) * 50
                 writer.add_image('train/L_GroundTruth', labs_l, iter_num)
@@ -739,14 +766,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_7.py', self_snapshot_path)
+    # shutil.copy('./just_try/ACDC/ACDC_train_4_6_4_pre_train.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,

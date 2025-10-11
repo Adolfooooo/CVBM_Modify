@@ -22,8 +22,9 @@ from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
-from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot, DynamicThresholdUpdater
+from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
 from networks.CVBM import CVBM, CVBM_Argument
+from utils.dynamic_threhold import DynamicThresholdUpdater
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')

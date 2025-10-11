@@ -1,101 +1,83 @@
 import torch
 import numpy as np
 
-class OneHotConverter(object):
-    
+class OneHotConverter:
     @staticmethod
-    def to_onehot(sample, num_classes):
+    def to_onehot(label, num_classes, device='cpu'):
         """
-        将标签转换为onehot编码
+        将标签转换为 one-hot 编码
         
         Args:
-            sample: dict, must include 'image' or 'label' keys
-            num_classes: 类别数量
-            
+            label (torch.Tensor | np.ndarray): 
+                - 形状: [H, W] 或 [B, H, W]
+                - 任意大小的整型标签张量或数组
+            num_classes (int): 类别数量
+            device (str): 处理设备 ('cpu' 或 'cuda')
+                
         Returns:
-            dict, with onehot labels added
+            torch.Tensor:
+                - 若输入为 [H, W] -> 输出形状为 [num_classes, H, W]
+                - 若输入为 [B, H, W] -> 输出形状为 [B, num_classes, H, W]
         """
-        result = {}
+        if isinstance(label, np.ndarray):
+            label = torch.from_numpy(label)
+
+        if not torch.is_tensor(label):
+            raise TypeError("label must be a torch.Tensor or np.ndarray")
+
+        # 将 label 移动到指定 device
+        device = torch.device(device)
+        label = label.to(device)
+
+        if label.dim() == 2:
+            # 单张图片 [H, W]
+            onehot = torch.zeros((num_classes, *label.shape), dtype=torch.float32, device=device)
+            onehot.scatter_(0, label.unsqueeze(0), 1.0)
+
+        elif label.dim() == 3:
+            # 批量数据 [B, H, W]
+            onehot = torch.zeros((label.shape[0], num_classes, label.shape[1], label.shape[2]),
+                                 dtype=torch.float32, device=device)
+            onehot.scatter_(1, label.unsqueeze(1), 1.0)
+
+        else:
+            raise ValueError(f"Unsupported label dimension: {label.dim()}. Expected 2D or 3D tensor.")
         
-        # 复制image字段
-        for key in sample:
-            if key.startswith('image'):
-                result[key] = sample[key]
-        
-        # 转换label字段
-        for key in sample:
-            if key.startswith('label'):
-                label = sample[key]
-                onehot_key = f'onehot_{key}'
-                
-                # 判断label的维度并相应创建onehot_label
-                if label.dim() == 2:  # 单张图片 [H, W]
-                    onehot_label = torch.zeros((num_classes, label.shape[0], label.shape[1]), 
-                                             dtype=torch.float32, device=label.device)
-                    for i in range(num_classes):
-                        onehot_label[i, :, :] = (label == i).type(torch.float32)
-                
-                elif label.dim() == 3:  # 批量数据 [B, H, W]
-                    onehot_label = torch.zeros((num_classes, label.shape[0], label.shape[1], label.shape[2]), 
-                                             dtype=torch.float32, device=label.device)
-                    for i in range(num_classes):
-                        onehot_label[i, :, :, :] = (label == i).type(torch.float32)
-                
-                else:
-                    raise ValueError(f"Unsupported label dimension: {label.dim()}. Expected 2D or 3D tensor.")
-                
-                # result[key] = label
-                result[onehot_key] = onehot_label.permute(1, 0, 2, 3)
-        
-        return result
-    
+        return onehot
+
     @staticmethod
-    def to_label(sample, num_classes=None):
+    def to_label(onehot, device='cpu'):
         """
-        将onehot编码转换为标签
+        将 one-hot 编码还原为标签
         
         Args:
-            sample: dict, must include 'image' or 'onehot_label' keys  
-            num_classes: 类别数量 (此函数中不使用，但保持接口一致性)
-            
+            onehot (torch.Tensor | np.ndarray):
+                - 形状: [num_classes, H, W] 或 [B, num_classes, H, W]
+                - 任意大小的浮点张量或数组
+            device (str): 处理设备 ('cpu' 或 'cuda')
+                
         Returns:
-            dict, with labels added
+            torch.Tensor:
+                - 若输入为 [num_classes, H, W] -> 输出 [H, W]
+                - 若输入为 [B, num_classes, H, W] -> 输出 [B, H, W]
         """
-        result = {}
+        if isinstance(onehot, np.ndarray):
+            onehot = torch.from_numpy(onehot)
+
+        if not torch.is_tensor(onehot):
+            raise TypeError("onehot must be a torch.Tensor or np.ndarray")
+
+        # 将 onehot 移动到指定 device
+        device = torch.device(device)
+        onehot = onehot.to(device)
+
+        if onehot.dim() == 3:
+            # [C, H, W]
+            label = torch.argmax(onehot, dim=0)
+        elif onehot.dim() == 4:
+            # [B, C, H, W]
+            label = torch.argmax(onehot, dim=1)
+        else:
+            raise ValueError(f"Unsupported onehot dimension: {onehot.dim()}. Expected 3D or 4D tensor.")
         
-        # 复制image字段
-        for key in sample:
-            if key.startswith('image'):
-                result[key] = sample[key]
-        
-        # 复制普通label字段
-        for key in sample:
-            if key.startswith('label') and not key.startswith('onehot_'):
-                result[key] = sample[key]
-        
-        # 转换onehot字段
-        for key in sample:
-            if key.startswith('onehot_'):
-                onehot_label = sample[key]
-                original_key = key[7:]  # 去掉'onehot_'
-                
-                if isinstance(onehot_label, torch.Tensor):
-                    # 根据onehot_label的维度进行不同处理
-                    if onehot_label.dim() == 3:  # [C, H, W] -> [H, W]
-                        label = torch.argmax(onehot_label, dim=0)
-                    elif onehot_label.dim() == 4:  # [C, B, H, W] -> [B, H, W]  
-                        label = torch.argmax(onehot_label, dim=0)
-                    else:
-                        raise ValueError(f"Unsupported onehot dimension: {onehot_label.dim()}. Expected 3D or 4D tensor.")
-                else:
-                    # NumPy数组处理
-                    if onehot_label.ndim == 3:  # [C, H, W] -> [H, W]
-                        label = np.argmax(onehot_label, axis=0)
-                    elif onehot_label.ndim == 4:  # [C, B, H, W] -> [B, H, W]
-                        label = np.argmax(onehot_label, axis=0)
-                    else:
-                        raise ValueError(f"Unsupported onehot dimension: {onehot_label.ndim}. Expected 3D or 4D array.")
-                
-                result[original_key] = label
-        
-        return result
+        return label.to(device)

@@ -23,7 +23,7 @@ from einops import rearrange
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
-from utils.DynamicThresholdUpdater import DynamicThresholdUpdater
+from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
