@@ -162,7 +162,7 @@ def get_ACDC_masks(output, nms=0,onehot=False):
 def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
     probs = F.softmax(output, dim=1)
     probs, indices = torch.max(probs, dim=1)
-    confidence_foreground_selection(probs, indices, threshold=0.5)
+    confidence_foreground_selection(probs, indices, threshold=0.7)
     if nms == 1:
         if onehot:
             indices = get_ACDC_2DLargestCC_onehot(indices)

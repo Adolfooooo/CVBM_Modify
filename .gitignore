@@ -5,7 +5,9 @@
 **copytest**
 __init__.py
 record_train.txt
-run_**.sh
+run_ACDC.sh
+run_LA.sh
+run_Pancreas.sh
 
 # folder
 **/results/
