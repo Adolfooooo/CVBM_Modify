@@ -1010,4 +1010,3 @@ class BlockContrastiveLossFullyVectorized(nn.Module):
         
         # 返回平均损失
         return torch.mean(losses)
-
