@@ -47,7 +47,7 @@ parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlab
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--consistency', type=float, default=0.1, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
-parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
+parser.add_argument('--magnitude', type=float, default='6.0', help=' bbmagnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
 parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_4_pre_train/1', help='snapshot_path')
 
@@ -546,8 +546,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    load_net(ema_model, pre_trained_model)
-    load_net_opt(model, optimizer, pre_trained_model)
+    # load_net(ema_model, pre_trained_model)
+    # load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -621,11 +621,17 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             input_mix_b_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
             net_input_s = torch.cat([input_mix_a_s, input_mix_b_s], dim=0)
 
-            # pseudo label
-            pseudo_label_mix_a = plab_a_fg * img_mask + lab_a * (1 - img_mask)
-            pseudo_label_mix_b = lab_b * img_mask + plab_b_fg * (1 - img_mask)
-            pseudo_label_mix_a_s = plab_a_bg_s * onehot_mask + lab_a_bg_s * (1 - onehot_mask)
-            pseudo_label_mix_b_s = lab_b_bg_s * onehot_mask + plab_b_bg_s * (1 - onehot_mask)
+            # pseudo label used plo
+            # pseudo_label_mix_a = plab_a_fg * img_mask + lab_a * (1 - img_mask)
+            # pseudo_label_mix_b = lab_b * img_mask + plab_b_fg * (1 - img_mask)
+            # pseudo_label_mix_a_s = plab_a_bg_s * onehot_mask + lab_a_bg_s * (1 - onehot_mask)
+            # pseudo_label_mix_b_s = lab_b_bg_s * onehot_mask + plab_b_bg_s * (1 - onehot_mask)
+            pseudo_pre_a_fg = torch.argmax(torch.softmax(pre_a_fg, dim=1), dim=1)
+            pseudo_pre_b_fg = torch.argmax(torch.softmax(pre_b_fg, dim=1), dim=1)
+            pseudo_label_mix_a = pseudo_pre_a_fg * img_mask + lab_a * (1 - img_mask)
+            pseudo_label_mix_b = lab_b * img_mask + pseudo_pre_b_fg * (1 - img_mask)
+            # pseudo_label_mix_a_s = plab_a_bg_s * onehot_mask + lab_a_bg_s * (1 - onehot_mask)
+            # pseudo_label_mix_b_s = lab_b_bg_s * onehot_mask + plab_b_bg_s * (1 - onehot_mask)
             
             # out_mix_a_fg,out_mix_a_fgbg, out_mix_a_s_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
@@ -772,7 +778,8 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
+
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
