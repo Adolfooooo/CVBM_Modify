@@ -307,8 +307,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     BCLLoss = losses.BlockContrastiveLoss()
 
     pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
-    # load_net(model, pretrained_model)
-    # load_net(ema_model, pretrained_model)
+    load_net(model, pretrained_model)
+    load_net(ema_model, pretrained_model)
 
 
     writer = SummaryWriter(self_snapshot_path + '/log')
