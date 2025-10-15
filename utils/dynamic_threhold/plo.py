@@ -7,6 +7,7 @@ class PseudoLabelOptimizer(nn.Module):
         self.threshold_low = threshold_low
         self.threshold_high = threshold_high
 
+    # It does not depend on the class of the pixels. The function simply gets the mask where the pixel probabilities are below the threshold.
     def forward(self, pseudo_labels):
         confident = pseudo_labels > self.threshold_high
         hesitant = (pseudo_labels <= self.threshold_high) & (pseudo_labels >= self.threshold_low)

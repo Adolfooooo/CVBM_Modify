@@ -81,3 +81,8 @@ class OneHotConverter:
             raise ValueError(f"Unsupported onehot dimension: {onehot.dim()}. Expected 3D or 4D tensor.")
         
         return label.to(device)
+
+
+if __name__ == "__main__":
+    x = torch.Tensor([[0, 1.0], [1.0, 2.0]])
+    print(OneHotConverter.to_onehot(x.to(dtype=torch.int64), num_classes=3))

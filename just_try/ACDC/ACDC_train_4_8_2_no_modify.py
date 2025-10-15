@@ -28,7 +28,7 @@ from utils.dynamic_threhold.plo import PseudoLabelOptimizer
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
@@ -49,7 +49,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help=' bbmagnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_4_pre_train/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_8_2/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -206,7 +206,7 @@ def get_ACDC_masks(output, nms=0,onehot=False):
     return probs
 
 
-def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
+def get_ACDC_masks_with_confidence(output, nms=0):
     probs = F.softmax(output, dim=1)
     # probs, indices = torch.max(probs, dim=1)
     # confidence_foreground_selection(probs, indices, threshold=0.3)
@@ -455,10 +455,12 @@ def onehot_mix_loss(
     mask,
     l_weight=1.0, u_weight=0.5,
     unlab=False,
-    unl_conf_mask=None,
+    unl_conf_mask=None, # [B, H, W]
     unl_hes_mask=None,
     w_conf=1.0, w_hes=0.5
 ):
+    unl_conf_mask = unl_conf_mask.unsqueeze(1)
+    unl_hes_mask = unl_hes_mask.unsqueeze(1)
     output_soft = F.softmax(output, dim=1)
 
     img_region   = mask.detach().clamp(0, 1)
@@ -793,14 +795,17 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
 
                 plab_soft_a_fg, plab_a_fg = get_ACDC_masks_with_confidence(pre_a_fg, nms=1)
-                mask_plab_a_fg_confident, mask_plab_a_fg_hesitant, _ = pseudo_label_optimizer(plab_a_fg)
+                mask_plab_a_fg_confident, mask_plab_a_fg_hesitant, _ = pseudo_label_optimizer(plab_soft_a_fg)
                 plab_soft_b_fg, plab_b_fg = get_ACDC_masks_with_confidence(pre_b_fg, nms=1)
-                mask_plab_b_fg_confident, mask_plab_b_fg_hesitant, _ = pseudo_label_optimizer(plab_b_fg)
+                mask_plab_b_fg_confident, mask_plab_b_fg_hesitant, _ = pseudo_label_optimizer(plab_soft_b_fg)
 
-                plab_soft_a_bg_s, plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, nms=1,onehot=True)
-                mask_plab_a_s_confident, mask_plab_a_s_hesitant, _ = pseudo_label_optimizer(plab_a_bg_s)
-                plab_soft_b_bg_s, plab_b_bg_s = get_ACDC_masks_with_confidence(pre_b_bg_s, nms=1,onehot=True)
-                mask_plab_b_s_confident, mask_plab_b_s_hesitant, _ = pseudo_label_optimizer(plab_b_bg_s)
+                plab_soft_a_bg_s, plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, nms=1)
+                mask_plab_a_s_confident, mask_plab_a_s_hesitant, _ = pseudo_label_optimizer(plab_soft_a_bg_s)
+                plab_a_bg_s = create_onehot.OneHotConverter.to_onehot(plab_a_bg_s, num_classes=args.num_classes, device="cuda")
+                
+                plab_soft_b_bg_s, plab_b_bg_s = get_ACDC_masks_with_confidence(pre_b_bg_s, nms=1)
+                mask_plab_b_s_confident, mask_plab_b_s_hesitant, _ = pseudo_label_optimizer(plab_soft_b_bg_s)
+                plab_b_bg_s = create_onehot.OneHotConverter.to_onehot(plab_b_bg_s, num_classes=args.num_classes, device="cuda")
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
@@ -839,8 +844,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             l_dice, l_ce = mix_loss(out_mix_b_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight,
                                         unl_conf_mask=mask_plab_b_fg_confident, unl_hes_mask=mask_plab_b_fg_hesitant)
 
-            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_mix_a_s_bg, plab_a_bg_s, lab_a_bg_s, onehot_mask,u_weight=args.u_weight, unlab=True)
-            l_dice_bg, l_ce_bg = onehot_mix_loss(out_mix_b_s_bg, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
+            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_mix_a_s_bg, plab_a_bg_s, lab_a_bg_s, onehot_mask,u_weight=args.u_weight, unlab=True,
+                                                        unl_conf_mask=mask_plab_a_s_confident, unl_hes_mask=mask_plab_a_s_hesitant)
+            l_dice_bg, l_ce_bg = onehot_mix_loss(out_mix_b_s_bg, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight,
+                                                    unl_conf_mask=mask_plab_b_s_confident, unl_hes_mask=mask_plab_b_s_hesitant)
 
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
@@ -852,7 +859,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             #   neg_patches: [B, L-16, C] 作为负样本
             bclloss = BCLLoss(pos_patches, neg_patches)
 
-            loss = loss_dice + loss_ce + consistency_weight * bclloss + loss_hesitant_pse
+            loss = loss_dice + loss_ce + consistency_weight * bclloss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             optimizer.zero_grad()
