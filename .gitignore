@@ -1,5 +1,6 @@
 # files
 **/** */.log
+*.log
 **.pyc
 **.pth
 **copytest**

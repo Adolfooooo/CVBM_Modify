@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from skimage.measure import label
-
+import concurrent.futures
 
 def getLargestCC(segmentation):
     labels = label(segmentation)
@@ -65,6 +65,35 @@ def var_all_case_LA_argument(model, num_classes, patch_size=(112, 112, 80), stri
     print('average metric is {}'.format(avg_dice))
     return avg_dice
 
+def process_image(image_path, model, stride_xy, stride_z, patch_size, num_classes):
+    h5f = h5py.File(image_path, 'r')
+    image = h5f['image'][:]
+    label = h5f['label'][:]
+    prediction, score_map = test_single_case_argument(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
+    
+    if np.sum(prediction) == 0:
+        dice = 0
+    else:
+        dice = metric.binary.dc(prediction, label)
+    
+    return dice
+
+def var_all_case_LA_argument_parallel(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, dataset_path=None):
+    assert type(dataset_path) is str
+    with open(dataset_path + '/test.list', 'r') as f:
+        image_list = f.readlines()
+    image_list = [dataset_path + '/2018LA_Seg_Training Set/' + item.replace('\n', '') + "/mri_norm2.h5" for item in image_list]
+
+    total_dice = 0.0
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        results = list(tqdm(executor.map(process_image, image_list, [model]*len(image_list), [stride_xy]*len(image_list),
+                                   [stride_z]*len(image_list), [patch_size]*len(image_list), [num_classes]*len(image_list)),
+                       total=len(image_list)))
+        
+    total_dice = sum(results)
+    avg_dice = total_dice / len(image_list)
+    print(f'Average metric is {avg_dice}')
+    return avg_dice
 
 def var_all_case_LA_bg(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, dataset_path=None):
     assert type(dataset_path) is str
