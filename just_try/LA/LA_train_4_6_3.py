@@ -21,7 +21,7 @@ from einops import rearrange
 
 from utils import losses, ramps, test_3d_patch
 # from dataloaders.dataset import *
-from dataloaders.dataset import LAHeart, RandomRotFlip, RandomCrop, ToTensor, WeakStrongAugment_LA, TwoStreamBatchSampler, DualAugmentTransform
+from dataloaders.dataset import LAHeart, RandomRotFlip, RandomCrop, ToTensor, TwoStreamBatchSampler, DualAugmentTransform
 from networks.net_factory import net_factory
 from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
@@ -33,13 +33,14 @@ parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_na
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
 parser.add_argument('--max_samples', type=int, default=80, help='maximum samples to train')
-parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
-parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=2, help='batch_size of labeled data per gpu')
+parser.add_argument('--batch_size', type=int, default=4, help='batch_size per gpu')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=8, help='trained samples')
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
+parser.add_argument('--num_workers', type=int, default=8, help='cpu core num_workers')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='10.0', help='magnitude')
@@ -52,7 +53,7 @@ parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight 
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
 parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_3/1/', help='snapshot path to save model')
 args = parser.parse_args()
-
+torch.backends.cudnn.benchmark = True
 
 def get_cut_mask(out, thres=0.5, nms=0):
     probs = F.softmax(out, 1)
@@ -177,9 +178,10 @@ def pre_train(args, snapshot_path):
     db_train = LAHeart(base_dir=train_data_path,
                        split='train',
                        transform=transforms.Compose([
-                           RandomRotFlip(),
+                        #    RandomRotFlip(),
                            RandomCrop(patch_size),
-                           ToTensor(),
+                           DualAugmentTransform(), 
+                        #    ToTensor(),
                        ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
@@ -191,8 +193,15 @@ def pre_train(args, snapshot_path):
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=0, pin_memory=True,
-                             worker_init_fn=worker_init_fn)
+    trainloader = DataLoader(
+        db_train, batch_sampler=batch_sampler, 
+        num_workers=args.num_workers, 
+        pin_memory=True,
+        worker_init_fn=worker_init_fn,
+        pin_memory_device="cuda",     # PyTorch 2.0+
+        # prefetch_factor=4,            # 可试 2~4
+        persistent_workers=True, 
+        )
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     DICE = losses.mask_DiceLoss(nclass=2)
     consistency_criterion = losses.mse_loss
@@ -300,8 +309,15 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=1, pin_memory=True,
-                             worker_init_fn=worker_init_fn)
+    trainloader = DataLoader(db_train, 
+        batch_sampler=batch_sampler, 
+        num_workers=args.num_workers, 
+        pin_memory=True,
+        worker_init_fn=worker_init_fn,
+        pin_memory_device="cuda",     # PyTorch 2.0+
+        # prefetch_factor=4,            # 可试 2~4
+        persistent_workers=True
+        )
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
@@ -335,8 +351,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             unimg_a, unimg_b = volume_batch[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch[
                                                                                        args.labeled_bs + sub_bs:]
             # strong augmentation
-            volume_batch_strong, label_batch_strong,  = sampled_batch['image_strong'], sampled_batch['label_strong']
-            volume_batch_strong, label_batch_strong,  = volume_batch_strong.cuda(), label_batch_strong.cuda()
+            volume_batch_strong, label_batch_strong = sampled_batch['image_strong'], sampled_batch['label_strong']
+            volume_batch_strong, label_batch_strong = volume_batch_strong.cuda(), label_batch_strong.cuda()
             img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
             lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
             lab_a_s_bg, lab_b_s_bg = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0

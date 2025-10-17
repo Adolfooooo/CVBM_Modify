@@ -7,7 +7,7 @@ from networks.net_factory import net_factory
 from utils.test_3d_patch import test_all_case, test_all_case_argument
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='../data/LA', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Experiment')
 parser.add_argument('--exp', type=str,  default='CVBM', help='exp_name')
 parser.add_argument('--model', type=str,  default='CVBM', help='model_name')
 parser.add_argument('--gpu', type=str,  default='0', help='GPU to use')
@@ -74,6 +74,7 @@ def test_calculate_metric_argument():
                            metric_detail=args.detail, nms=args.nms)
 
     return avg_metric
+
 
 if __name__ == '__main__':
     if args.model == "CVBM":

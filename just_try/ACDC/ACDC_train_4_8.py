@@ -28,7 +28,7 @@ from utils.dynamic_threhold.plo import PseudoLabelOptimizer
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
@@ -39,6 +39,7 @@ parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation ne
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
+parser.add_argument('--num_workers', type=int, default=1, help='num_workers of cpu cores')
 # label and unlabel
 parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
@@ -49,8 +50,9 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help=' bbmagnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_4_pre_train/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_8/1', help='snapshot_path')
 
+torch.backends.cudnn.benchmark = True
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
 self_max_iterations = args.max_iterations
@@ -413,8 +415,15 @@ def pre_train(args, snapshot_path):
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
                                           args.batch_size - args.labeled_bs)
 
-    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
-                             worker_init_fn=worker_init_fn)
+    trainloader = DataLoader(
+        db_train, 
+        batch_sampler=batch_sampler, 
+        num_workers=args.num_workers, 
+        prefetch_factor=2,
+        pin_memory=True,
+        worker_init_fn=worker_init_fn,
+        persistent_workers=True,
+    )
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
 
@@ -539,7 +548,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
                                           args.batch_size - args.labeled_bs)
 
-    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
+    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True,
                              worker_init_fn=worker_init_fn)
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
