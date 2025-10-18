@@ -187,7 +187,7 @@ def pre_train(args, snapshot_path):
         worker_init_fn=worker_init_fn,
         pin_memory_device="cuda",     # PyTorch 2.0+
         persistent_workers=True
-        )
+    )
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     DICE = losses.mask_DiceLoss(nclass=2)
     consistency_criterion = losses.mse_loss
@@ -311,8 +311,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
     pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
-    # load_net(model, pretrained_model)
-    # load_net(ema_model, pretrained_model)
+    load_net(model, pretrained_model)
+    load_net(ema_model, pretrained_model)
 
     model.train()
     ema_model.train()
@@ -530,7 +530,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
