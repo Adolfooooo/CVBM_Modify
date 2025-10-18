@@ -372,21 +372,21 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_u_bg = mix_loss(outputs_u_bg_s, plab_b_bg_s, lab_b_bg, loss_mask, u_weight=args.u_weight, unlab=True)
             output_mix_bg_fg = (outputs_l + outputs_u)/2
             ### Bidirectional Consistency Loss
-            loss_consist_l = (
-                    consistency_criterion(F.softmax(outputs_l_fg, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
-                    + consistency_criterion(F.softmax(outputs_l, dim=1), F.softmax((outputs_l_fg), dim=1))
-            )
-            loss_consist_u = (
-                    consistency_criterion(F.softmax(outputs_u_fg, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
-                    + consistency_criterion(F.softmax(outputs_u, dim=1), F.softmax((outputs_u_fg), dim=1))
-            )
+            # loss_consist_l = (
+            #         consistency_criterion(F.softmax(outputs_l_fg, dim=1), F.softmax((1 - outputs_l_bg_s), dim=1))
+            #         + consistency_criterion(F.softmax(outputs_l, dim=1), F.softmax((outputs_l_fg), dim=1))
+            # )
+            # loss_consist_u = (
+            #         consistency_criterion(F.softmax(outputs_u_fg, dim=1), F.softmax((1 - outputs_u_bg_s), dim=1))
+            #         + consistency_criterion(F.softmax(outputs_u, dim=1), F.softmax((outputs_u_fg), dim=1))
+            # )
             consistency_weight = get_current_consistency_weight(iter_num // 150)
 
 
             pos_patches, neg_patches = select_patches_for_contrast_3d(output_mix_bg_fg, topnum=250, patch_size=(8, 8, 8), choose_largest=False)
             bclloss = BCLLoss(pos_patches, neg_patches)
 
-            loss_origin = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * (loss_consist_l + loss_consist_u)
+            loss_origin = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * (bclloss)
 
             loss = loss_origin
 
@@ -402,8 +402,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss.backward()
             optimizer.step()
             logging.info(
-                'iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_consist_l: %03f, loss_consist_u: %03f' % (
-                    iter_num, loss, loss_l, loss_u, loss_consist_l, loss_consist_u))
+                'iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, bcl: %03f' % (
+                    iter_num, loss, loss_l, loss_u, bclloss))
 
             update_ema_variables(model, ema_model, 0.99)
 
