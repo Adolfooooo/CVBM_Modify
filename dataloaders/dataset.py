@@ -647,7 +647,10 @@ class RandomContrast:
             result = self.mean + alpha * (m - self.mean)
             return np.clip(result, -1, 1)
         return m
-        
+
+
+
+
 
 class DualAugmentTransform:
     """
