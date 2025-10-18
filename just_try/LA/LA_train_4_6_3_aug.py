@@ -248,7 +248,7 @@ def pre_train(args, snapshot_path):
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
             writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
-
+            logging.info("y_prob2: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), label_batch.sum()))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -527,7 +527,7 @@ if __name__ == "__main__":
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
-    # shutil.copy('./just_try/LA/LA_train_4_6_3_aug.py', self_snapshot_path)
+    shutil.copy('./just_try/LA/LA_train_4_6_3_aug.py', self_snapshot_path)
     # # -- Pre-Training
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
