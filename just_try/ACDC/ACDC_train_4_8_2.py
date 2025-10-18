@@ -514,6 +514,36 @@ def onehot_mix_loss(
     return loss_dice_lab + loss_dice_unl, loss_ce_lab + loss_ce_unl
 
 
+def mix_loss_origin(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
+    CE = nn.CrossEntropyLoss(reduction='none')
+    img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
+    output_soft = F.softmax(output, dim=1)
+    image_weight, patch_weight = l_weight, u_weight
+    if unlab:
+        image_weight, patch_weight = u_weight, l_weight
+    patch_mask = 1 - mask
+    loss_dice = dice_loss(output_soft, img_l.unsqueeze(1), mask.unsqueeze(1)) * image_weight
+    loss_dice += dice_loss(output_soft, patch_l.unsqueeze(1), patch_mask.unsqueeze(1)) * patch_weight
+    loss_ce = image_weight * (CE(output, img_l) * mask).sum() / (mask.sum() + 1e-16)
+    loss_ce += patch_weight * (CE(output, patch_l) * patch_mask).sum() / (patch_mask.sum() + 1e-16)  # loss = loss_ce
+    return loss_dice, loss_ce
+
+
+def onehot_mix_loss_origin(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
+    # CE = CrossEntropyLoss
+    img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
+    output_soft = F.softmax(output, dim=1)
+    image_weight, patch_weight = l_weight, u_weight
+    if unlab:
+        image_weight, patch_weight = u_weight, l_weight
+    patch_mask = 1 - mask
+    loss_dice = onehot_dice_loss(output_soft, img_l, mask) * image_weight
+    loss_dice += onehot_dice_loss(output_soft, patch_l, patch_mask) * patch_weight
+    loss_ce = onehot_ce_loss(output_soft, img_l, mask) * image_weight
+    loss_ce += onehot_ce_loss(output_soft, patch_l, patch_mask) * patch_weight  # loss = loss_ce
+
+    return loss_dice, loss_ce
+
 ### provide for label data to get sclice num
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
@@ -641,8 +671,8 @@ def pre_train(args, snapshot_path):
             # -- original
             net_input = img_a * img_mask + img_b * (1 - img_mask)
             out_mixl_fg,out_mixl, outputs_mixl_bg, _, _ = model(net_input, net_input)
-            loss_dice, loss_ce = mix_loss(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
-            loss_dice_bg, loss_ce_bg = onehot_mix_loss(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
+            loss_dice, loss_ce = mix_loss_origin(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
+            loss_dice_bg, loss_ce_bg = onehot_mix_loss_origin(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
                                                        unlab=True)
             loss = (loss_dice + loss_dice_bg + loss_ce + loss_ce_bg) / 2
 
@@ -740,8 +770,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    # load_net(ema_model, pre_trained_model)
-    # load_net_opt(model, optimizer, pre_trained_model)
+    load_net(ema_model, pre_trained_model)
+    load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
@@ -954,14 +984,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    # shutil.copy('./just_try/ACDC/ACDC_train_4_6_4_pre_train.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_4_8_2.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
 
 
     # Self_train
