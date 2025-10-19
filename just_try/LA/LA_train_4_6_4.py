@@ -431,7 +431,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             #     for param_group in optimizer.param_groups:
             #         param_group['lr'] = lr_
 
-            if iter_num % 2 == 0:
+            if iter_num % 200 == 0:
                 model.eval()
                 ema_model.eval()
                 # dice_sample, ema_dice_sample = test_3d_patch.var_all_case_LA_argument_ema(model, ema_model, num_classes=num_classes, patch_size=patch_size,
