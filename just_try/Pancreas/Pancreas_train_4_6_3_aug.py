@@ -425,7 +425,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
             if iter_num % 200 == 0:
                 model.eval()
-                dice_sample, ema_dice_sample = test_3d_patch.var_all_case_Pancreas_argument_ema(model, num_classes=num_classes, patch_size=patch_size,
+                dice_sample, ema_dice_sample = test_3d_patch.var_all_case_Pancreas_argument_ema(model, ema_model, num_classes=num_classes, patch_size=patch_size,
                                                                   stride_xy=16, stride_z=16, dataset_path=args.root_path)
 
                 if dice_sample > best_dice:
