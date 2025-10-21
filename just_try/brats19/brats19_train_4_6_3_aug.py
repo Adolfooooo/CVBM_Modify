@@ -299,7 +299,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     #                    ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
-    unlabeled_idxs = list(range(labelnum, args.max_samples))
+    unlabeled_idxs = list(range(labelnum, len(db_train)))
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
                                           args.batch_size - args.labeled_bs)
     sub_bs = int(args.labeled_bs / 2)
@@ -535,7 +535,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')

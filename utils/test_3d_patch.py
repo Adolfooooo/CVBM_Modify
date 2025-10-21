@@ -285,7 +285,7 @@ def var_all_case_BRATS19_argument(model, num_classes, patch_size=(96, 96, 96), s
         h5f = h5py.File(image_path, 'r')
         image = h5f['image'][:]
         label = h5f['label'][:]
-        prediction, score_map = test_all_case_argument(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
+        prediction, score_map = test_single_case_argument(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
         if np.sum(prediction) == 0:
             dice = 0
         else:
