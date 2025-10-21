@@ -173,19 +173,6 @@ def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
     return indices
 
 
-def get_ACDC_masks_with_confidence_dynamic(output , dynamic_threhold_updater, nms=0, onehot=False):
-    probs = F.softmax(output, dim=1)
-    probs, indices = torch.max(probs, dim=1)
-    dynamic_threshold_class = dynamic_threhold_updater.update_threshold(class_num=4, dynamic_thresholds=dynamic_threshold_class, alpha=0.99)
-    indices = generate_pseudo_labels_with_confidence(probs, indices, threshold=dynamic_threshold_class)
-    if nms == 1:
-        if onehot:
-            indices = get_ACDC_2DLargestCC_onehot(indices)
-        else:
-            indices = get_ACDC_2DLargestCC(indices)
-    return indices
-
-
 def confidence_foreground_selection(segmentation, indices, threshold): 
     """
     基于置信度的前景模块选择
@@ -670,7 +657,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             # mask_mix_b_s_confident, mask_mix_b_s_hesitant, _ = \
             # pseudo_label_optimizer(create_onehot.OneHotConverter.to_label(pseudo_label_mix_b_s))
 
-            pse_mix_a = torch.argmax(torch.softmax(out_mix_a_fg, dim=1), dim=1)
+            # pse_mix_a = torch.argmax(torch.softmax(out_mix_a_fg, dim=1), dim=1)
             pse_mix_b = torch.argmax(torch.softmax(out_mix_b_fg, dim=1), dim=1)
             # loss_mix_a = pseudo_label_optimizer.calculate_loss(pse_mix_a, pseudo_label_mix_a, mask_mix_a_confident, mask_mix_a_hesitant)
             loss_mix_b = pseudo_label_optimizer.calculate_loss(pse_mix_b, pseudo_label_mix_b, mask_mix_b_confident, mask_mix_b_hesitant)
