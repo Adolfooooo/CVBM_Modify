@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class PseudoLabelOptimizer(nn.Module):
-    def __init__(self, threshold_low=0.3, threshold_high=0.7):
+    def __init__(self, threshold_low=0.4, threshold_high=0.8):
         super(PseudoLabelOptimizer, self).__init__()
         self.threshold_low = threshold_low
         self.threshold_high = threshold_high
