@@ -398,6 +398,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
 
+
             pos_patches, neg_patches = select_patches_for_contrast_3d(output_mix_bg_fg, topnum=20, patch_size=(8, 8, 8), choose_largest=False)
             bclloss = BCLLoss(pos_patches, neg_patches)
 
@@ -427,7 +428,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             #     for param_group in optimizer.param_groups:
             #         param_group['lr'] = lr_
 
-            if iter_num % 400 == 0:
+            if iter_num % 200 == 0:
                 model.eval()
                 ema_model.eval()
                 dice_sample = test_3d_patch.var_all_case_BRATS19_argument(model, num_classes=args.num_classes, patch_size=args.patch_size,
@@ -456,7 +457,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 writer.add_scalar('4_Var_dice/Best_dice', ema_best_dice, iter_num)
                 model.train()
 
-            if iter_num % 400 == 1:
+            if iter_num % 200 == 1:
                 ins_width = 2
                 B, C, H, W, D = outputs_l.size()
                 snapshot_img = torch.zeros(size=(D, 3, 3 * H + 3 * ins_width, W + ins_width), dtype=torch.float32)
