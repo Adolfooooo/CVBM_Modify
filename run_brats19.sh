@@ -6,7 +6,7 @@ wait
 python -m just_try.brats19.brats19_train_4_6_3_aug \
     --root_path '/root/BRATS19' \
     --gpu 0 \
-    --exp 'CVBM_LA' \
+    --exp 'CVBM_BRATS19' \
     --model 'CVBM_Argument' \
     --labelnum 25 \
     --deterministic 0 \
@@ -16,7 +16,7 @@ python -m just_try.brats19.brats19_train_4_6_3_aug \
 python -m just_try.brats19.brats19_train_4_6_3_aug \
     --root_path '/root/BRATS19' \
     --gpu 0 \
-    --exp 'CVBM_LA' \
+    --exp 'CVBM_BRATS19' \
     --model 'CVBM_Argument' \
     --labelnum 50 \
     --deterministic 0 \

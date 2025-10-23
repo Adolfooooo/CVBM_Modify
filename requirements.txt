@@ -7,3 +7,4 @@ scikit-image
 nibabel
 einops
 opencv-python
+connected-components-3d
