@@ -32,14 +32,14 @@ parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_n
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
-parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
+parser.add_argument('--batch_size', type=int, default=12, help='batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=6, help='labeled_batch_size per gpu')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
 # label and unlabel
-parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
@@ -157,16 +157,17 @@ def get_ACDC_masks(output, nms=0,onehot=False):
             probs = get_ACDC_2DLargestCC(indices)
     return probs
 
+
 def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
     probs = F.softmax(output, dim=1)
     probs, indices = torch.max(probs, dim=1)
-    confidence_foreground_selection(probs, indices, threshold=0.5)
+    filtered_indices = confidence_foreground_selection(probs, indices, threshold=0.5)
     if nms == 1:
         if onehot:
-            indices = get_ACDC_2DLargestCC_onehot(indices)
+            filtered_indices = get_ACDC_2DLargestCC_onehot(filtered_indices)
         else:
-            indices = get_ACDC_2DLargestCC(indices)
-    return indices
+            filtered_indices = get_ACDC_2DLargestCC(filtered_indices)
+    return filtered_indices
 
 def confidence_foreground_selection(segmentation, indices, threshold): 
     """
