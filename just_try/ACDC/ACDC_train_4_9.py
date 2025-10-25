@@ -23,7 +23,7 @@ from einops import rearrange
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
-from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
+from utils.dynamic_threhold.CurriculumDT import CurriculumDynamicThresholding
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
@@ -158,15 +158,16 @@ def get_ACDC_masks(output, nms=0,onehot=False):
     return probs
 
 
-def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
-    probs = F.softmax(output, dim=1)
-    probs, indices = torch.max(probs, dim=1)
-    filtered_indices = confidence_foreground_selection(probs, indices, threshold=0.5)
+def get_ACDC_masks_with_confidence(output, cdt: CurriculumDynamicThresholding, nms=0,onehot=False):
+    pseudo_u, mask_u, T_c = cdt.make_pseudo(output) 
+    # probs = F.softmax(output, dim=1)
+    # probs, indices = torch.max(probs, dim=1)
+    # filtered_indices = confidence_foreground_selection(probs, indices, threshold=0.5)
     if nms == 1:
         if onehot:
-            filtered_indices = get_ACDC_2DLargestCC_onehot(filtered_indices)
+            filtered_indices = get_ACDC_2DLargestCC_onehot(pseudo_u)
         else:
-            filtered_indices = get_ACDC_2DLargestCC(filtered_indices)
+            filtered_indices = get_ACDC_2DLargestCC(pseudo_u)
     return filtered_indices
 
 def confidence_foreground_selection(segmentation, indices, threshold): 
@@ -542,6 +543,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
     ce_loss = CrossEntropyLoss()
+    cdt = CurriculumDynamicThresholding(tau=0.6).cuda()
 
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
@@ -604,6 +606,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
             net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
 
+
+            cdt.make_pseudo()
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
