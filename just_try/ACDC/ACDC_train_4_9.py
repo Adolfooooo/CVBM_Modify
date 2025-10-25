@@ -23,7 +23,7 @@ from einops import rearrange
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
-from utils.dynamic_threhold.CurriculumDT import CurriculumDynamicThresholding
+from utils.dynamic_threhold.CurriculumDT import CurriculumDynamicThresholdingND
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
@@ -158,7 +158,7 @@ def get_ACDC_masks(output, nms=0,onehot=False):
     return probs
 
 
-def get_ACDC_masks_with_confidence(output, cdt: CurriculumDynamicThresholding, nms=0,onehot=False):
+def get_ACDC_masks_with_confidence(output, cdt: CurriculumDynamicThresholdingND, nms=0,onehot=False):
     pseudo_u, mask_u, T_c = cdt.make_pseudo(output) 
     # probs = F.softmax(output, dim=1)
     # probs, indices = torch.max(probs, dim=1)
@@ -543,7 +543,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
     ce_loss = CrossEntropyLoss()
-    cdt = CurriculumDynamicThresholding(tau=0.6).cuda()
+    cdt = CurriculumDynamicThresholdingND(tau=0.6).cuda()
 
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1

@@ -41,5 +41,5 @@ class CurriculumDynamicThresholdingND(nn.Module):
         """From teacher logits -> (pseudo, mask, T_c)."""
         mask, T_c, y_hat = self.forward(teacher_logits)
         pseudo = y_hat.clone()
-        pseudo[~mask] = self.ignore_index
+        # pseudo[~mask] = self.ignore_index
         return pseudo, mask, T_c
