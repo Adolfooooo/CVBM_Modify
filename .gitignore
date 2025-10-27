@@ -9,6 +9,7 @@ record_train.txt
 run_ACDC.sh
 run_LA.sh
 run_Pancreas.sh
+run_*.sh
 
 # folder
 **/results/
@@ -18,5 +19,4 @@ run_Pancreas.sh
 **/.ipynb_checkpoints/
 **/images/
 **/.vscode/
-
 

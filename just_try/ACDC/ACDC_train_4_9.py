@@ -23,7 +23,7 @@ from einops import rearrange
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
-from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
+from utils.dynamic_threhold.CurriculumDT import CurriculumDynamicThresholdingND
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
@@ -32,14 +32,14 @@ parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_n
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
-parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
+parser.add_argument('--batch_size', type=int, default=12, help='batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=6, help='labeled_batch_size per gpu')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
 # label and unlabel
-parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
@@ -157,16 +157,18 @@ def get_ACDC_masks(output, nms=0,onehot=False):
             probs = get_ACDC_2DLargestCC(indices)
     return probs
 
-def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
-    probs = F.softmax(output, dim=1)
-    probs, indices = torch.max(probs, dim=1)
-    confidence_foreground_selection(probs, indices, threshold=0.5)
+
+def get_ACDC_masks_with_confidence(output, cdt: CurriculumDynamicThresholdingND, nms=0,onehot=False):
+    pseudo_u, mask_u, T_c = cdt.make_pseudo(output) 
+    # probs = F.softmax(output, dim=1)
+    # probs, indices = torch.max(probs, dim=1)
+    # filtered_indices = confidence_foreground_selection(probs, indices, threshold=0.5)
     if nms == 1:
         if onehot:
-            indices = get_ACDC_2DLargestCC_onehot(indices)
+            filtered_indices = get_ACDC_2DLargestCC_onehot(pseudo_u)
         else:
-            indices = get_ACDC_2DLargestCC(indices)
-    return indices
+            filtered_indices = get_ACDC_2DLargestCC(pseudo_u)
+    return filtered_indices
 
 def confidence_foreground_selection(segmentation, indices, threshold): 
     """
@@ -541,6 +543,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
     ce_loss = CrossEntropyLoss()
+    cdt = CurriculumDynamicThresholdingND(tau=0.6).cuda()
 
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
@@ -603,6 +606,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
             net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
 
+
+            cdt.make_pseudo()
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)

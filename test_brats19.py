@@ -15,7 +15,7 @@ from networks.net_factory import net_factory
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/BRATS19', help='Name of Experiment')
-parser.add_argument('--exp', type=str,  default='CVBM_LA', help='exp_name')
+parser.add_argument('--exp', type=str,  default='CVBM_BRATS19', help='exp_name')
 parser.add_argument('--model', type=str,  default='CVBM_Argument', help='model_name')
 parser.add_argument('--gpu', type=str,  default='0', help='GPU to use')
 parser.add_argument('--detail', type=int,  default=1, help='print metrics for every samples?')
@@ -149,24 +149,32 @@ def calculate_metric_percase(pred, gt):
 
 def test_calculate_metric():
     model = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes, mode="test")
+    ema_model = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes, mode="test")
 
     save_model_path = os.path.join(args.snapshot_path, '{}_best_model.pth'.format(args.model))
     save_ema_model_path = os.path.join(args.snapshot_path, '{}_ema_best_model.pth'.format(args.model))
 
     model.load_state_dict(torch.load(save_model_path))
+    ema_model.load_state_dict(torch.load(save_ema_model_path))
     print("init weight from {}".format(save_model_path))
+    print("init weight from {}".format(save_ema_model_path))
 
     model.eval()
+    ema_model.eval()
     
     test_dataset = BRATSDataset(base_dir=os.path.join(args.root_path), split="test")
 
     avg_metric = test_all_case(model, test_dataset, num_classes=2,
                                patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
                                post_process=True)
-
-    return avg_metric
+    print(avg_metric)
+    avg_ema_metric = test_all_case(ema_model, test_dataset, num_classes=2,
+                               patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
+                               post_process=True)
+    print(avg_ema_metric)
+    return avg_metric, avg_ema_metric
 
 
 if __name__ == '__main__':
-    metric = test_calculate_metric()
-    print(metric)
+    metric, ema_metric = test_calculate_metric()
+    
