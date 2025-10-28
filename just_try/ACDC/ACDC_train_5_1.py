@@ -32,14 +32,14 @@ parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_n
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
-parser.add_argument('--batch_size', type=int, default=12, help='batch_size per gpu')
+parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
 # label and unlabel
-parser.add_argument('--labeled_bs', type=int, default=6, help='labeled_batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
@@ -48,7 +48,7 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_3/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_5_1/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -611,10 +611,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
 
             # conv 3x3 connect
-            output_mix = torch.cat([out_unl, out_l], dim=1)
-            conv2d = nn.Conv2d(args.num_classes*2, args.num_classes, 1, padding=0)
-            conv2d = conv2d.cuda()
-            output_mix = conv2d(output_mix)
+            output_mix = torch.cat([out_unl, out_l], dim=0)
+            # output_mix = nn.Conv3d(args.num_classes * 2, args.num_classes, 1, padding=0)
 
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
@@ -727,7 +725,7 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_6_3.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_5_1.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
