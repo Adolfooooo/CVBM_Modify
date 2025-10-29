@@ -224,7 +224,7 @@ def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return 5 * args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
-
+@torch.no_grad()
 def update_model_ema(model, ema_model, alpha):
     model_state = model.state_dict()
     model_ema_state = ema_model.state_dict()
@@ -611,10 +611,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
 
             # conv 3x3 connect
-            output_mix = torch.cat([out_unl, out_l], dim=1)
-            conv2d = nn.Conv2d(args.num_classes*2, args.num_classes, 1, padding=0)
-            conv2d = conv2d.cuda()
-            output_mix = conv2d(output_mix)
+            output_mix = torch.cat([out_unl, out_l], dim=0)
+            # conv2d = nn.Conv2d(args.num_classes*2, args.num_classes, 1, padding=0)
+            # conv2d = conv2d.cuda()
+            # output_mix = conv2d(output_mix)
 
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)

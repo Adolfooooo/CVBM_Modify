@@ -25,6 +25,11 @@ from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
 from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
+from utils.bhc_utils import (
+    ProjectionHead, build_bg_consensus_mask_batch, select_bhc_patches,
+    gather_patch_vectors, bhc_repulsive_loss, anchor_weights_from_uncertainty
+)
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
@@ -57,11 +62,6 @@ dice_loss = losses.DiceLoss(n_classes=4)
 onehot_dice_loss = losses.DiceLoss2d(n_classes=4)
 onehot_ce_loss=losses.CrossEntropyLoss(n_classes=4)
 alpha = 0.99
-num_classes = args.num_classes
-dynamic_threshold_bg = [1/num_classes for i in range(4)]
-dynamic_threshold_fg = [1/num_classes for i in range(4)]
-dynamic_threshold_class = [1/num_classes for i in range(args.num_classes)]
-plt_bg, plt_fg = {}, {}
 
 
 
@@ -188,43 +188,11 @@ def confidence_foreground_selection(segmentation, indices, threshold):
     return filtered_indices
 
 
-def generate_pseudo_labels_with_confidence(predictions, class_thresholds):
-    """
-    根据类别阈值生成伪标签
-    
-    Args:
-            模型的预测输出（softmax 概率或者 sigmoid 后的置信度）。
-        class_thresholds: list or torch.Tensor, shape (C,)
-            每个类别对应的阈值。
-    
-    Returns:
-        torch.Tensor, shape (B, H, W, D)
-            伪标签（低于对应类别阈值的像素设为0）
-    """
-    B, C, H, W = predictions.shape
-    if not torch.is_tensor(class_thresholds):
-        class_thresholds = torch.tensor(class_thresholds, device=predictions.device, dtype=predictions.dtype)
-
-    # (B, H, W) 取每个像素的最大概率类别
-    probs, pred_classes = torch.max(predictions, dim=1)  # probs: (B,H,W), pred_classes: (B,H,W)
-
-    # 获取每个像素对应的类别阈值
-    thresholds = class_thresholds[pred_classes]  # (B,H,W)
-
-    # 判断是否超过类别阈值
-    mask = probs > thresholds  # (B,H,W)
-
-    # 应用阈值过滤，低置信度设为背景（0）
-    pseudo_labels = pred_classes * mask
-
-    return pseudo_labels
-
-
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return 5 * args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
-
+#### !!!!!!!没有关梯度
 def update_model_ema(model, ema_model, alpha):
     model_state = model.state_dict()
     model_ema_state = ema_model.state_dict()
@@ -246,32 +214,6 @@ def generate_mask(img, number_class):
     loss_mask[:, w:w + patch_x, h:h + patch_y] = 0
     onehot_mask[:, :, w:w + patch_x, h:h + patch_y] = 0
     return mask.long(), loss_mask.long(), onehot_mask.long()
-
-
-def random_mask(img, shrink_param=3):
-    batch_size, channel, img_x, img_y = img.shape[0], img.shape[1], img.shape[2], img.shape[3]
-    loss_mask = torch.ones(batch_size, img_x, img_y).cuda()
-    x_split, y_split = int(img_x / shrink_param), int(img_y / shrink_param)
-    patch_x, patch_y = int(img_x * 2 / (3 * shrink_param)), int(img_y * 2 / (3 * shrink_param))
-    mask = torch.ones(img_x, img_y).cuda()
-    for x_s in range(shrink_param):
-        for y_s in range(shrink_param):
-            w = np.random.randint(x_s * x_split, (x_s + 1) * x_split - patch_x)
-            h = np.random.randint(y_s * y_split, (y_s + 1) * y_split - patch_y)
-            mask[w:w + patch_x, h:h + patch_y] = 0
-            loss_mask[:, w:w + patch_x, h:h + patch_y] = 0
-    return mask.long(), loss_mask.long()
-
-
-def contact_mask(img):
-    batch_size, channel, img_x, img_y = img.shape[0], img.shape[1], img.shape[2], img.shape[3]
-    loss_mask = torch.ones(batch_size, img_x, img_y).cuda()
-    mask = torch.ones(img_x, img_y).cuda()
-    patch_y = int(img_y * 4 / 9)
-    h = np.random.randint(0, img_y - patch_y)
-    mask[h:h + patch_y, :] = 0
-    loss_mask[:, h:h + patch_y, :] = 0
-    return mask.long(), loss_mask.long()
 
 
 def mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
@@ -318,53 +260,89 @@ def patients_to_slices(dataset, patiens_num):
     return ref_dict[str(patiens_num)]
 
 
-def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose_largest=False):
-    """
-    output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
-    返回:
-      pos_patches: [B, topnum, C]
-      neg_patches: [B, L-topnum, C]
-    """
-    B, C, H, W = output_mix.shape
-    ph, pw = patch_size
-    assert H % ph == 0 and W % pw == 0, "H/W 必须能被 patch_size 整除（不重叠 patch）"
+def new_contrastive(args, model, output:list):
 
-    # 1) 概率 & 置信度图
-    probs = F.softmax(output_mix, dim=1)          # [B, C, H, W]
-    score = probs.max(dim=1, keepdim=True).values # [B, 1, H, W]
+    out_unl_fg, out_l_fg, out_unl, out_l, out_unl_bg, out_l_bg = output
+    # 初始化投影头：输入通道 = 前景分支通道数 + 背景分支通道数
+    # 这里以 out_unl_fg.shape[1]、out_unl_bg.shape[1] 为准（示例写法：放到第一次可用时再创建）
+    if 'proj_head' not in locals():
+        in_ch_proj = out_unl_fg.shape[1] + out_unl_bg.shape[1]
+        proj_head = ProjectionHead(in_ch=in_ch_proj, out_dim=128).to('cuda')
 
-    # 2) 用 unfold 把置信度图切 patch，并做均值 -> 每个 patch 的置信度
-    # unfold 输出 [B, patch_area, L]，L 为 patch 个数
-    score_patches = F.unfold(score, kernel_size=(ph, pw), stride=(ph, pw))  # [B, ph*pw, L]
-    patch_conf = score_patches.mean(dim=1)                                   # [B, L]
+    # BHC 超参（按你的2D先跑起步值）
+    tau_fg = 0.70      # 弱视图（前景分支）的“非前景”阈值
+    tau_bg    = 0.80      # 强视图（背景分支）的“背景”阈值
+    tau_patch = 0.70      # patch 级背景纯度阈值
+    bg_index  = 0         # 背景通道索引（若多类）
+    fg_indices = None     # 若多类且已知前景类索引集合，可传 list；否则默认“除背景外全是前景类”
+    assume_multiclass = None  
 
-    # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
-    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)        # [B, topnum]
-    B_, L = patch_conf.shape
-    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
-    mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
-    mask.scatter_(1, top_idx, False)                                          # 正样本位置设为 False
-    # 剩余的就是负样本
-    num_neg = L - topnum
+    patch_size = (8,8)
+    stride     = (8,8)
+    topk       = 4
+    margin     = 0.20
+    temperature= 0.07
+    lambda_bhc = 0.5
+    gamma_uncert = 1.0
 
-    # 4) 切特征图并对齐到 [B, L, C]（每个 patch 一个向量，features_dim=C）
-    # 对概率图做 unfold: [B, C*ph*pw, L] -> [B, C, ph*pw, L] -> 在 patch 内做均值 -> [B, C, L] -> [B, L, C]
-    feat_patches = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))     # [B, C*ph*pw, L]
-    feat_patches = feat_patches.view(B, C, ph*pw, L).mean(dim=2)              # [B, C, L]
-    feat_patches = feat_patches.permute(0, 2, 1).contiguous()                 # [B, L, C]
 
-    # 5) 基于索引/掩码取出正负 patch，得到 [B, patchnum, features_dim]
-    # 正样本（最低置信度的 topnum 个）
-    pos_patches = torch.gather(
-        feat_patches, dim=1,
-        index=top_idx.unsqueeze(-1).expand(-1, -1, C)                         # [B, topnum, C]
-    )                                                                          # -> [B, topnum, C]
+    # ===== 每个 iteration，在你已有 supervised/伪监督 loss 之后，插入以下 BHC 计算 =====
 
-    # 负样本（其余 patch）
-    # 用布尔掩码批量选择，再 reshape 回 [B, L-topnum, C]
-    neg_patches = feat_patches[mask].view(B, num_neg, C)                      # [B, L-topnum, C]
+    # 0) 统一 batch：out_fg_batch / out_bg_batch
+    out_fg_batch = torch.cat([out_unl_fg, out_l_fg], dim=0)   # [B_fg, C_fg, H, W]
+    out_bg_batch = torch.cat([out_unl_bg, out_l_bg], dim=0)   # [B_bg, C_bg, H, W]
+    assert out_fg_batch.shape[0] == out_bg_batch.shape[0], "fg/bg batch 尺寸不一致"
 
-    return pos_patches, neg_patches
+    # 1) 重建最终融合 logits q_m（用模型的 1x1 融合头）
+    #    注意：下面调用假设你的模型里已经有 self.final_seg（Conv2d）
+    #    若你的模型封装名不同，请改成 model.final_seg(...)
+    q_m = model.final_seg(torch.cat([out_fg_batch, out_bg_batch], dim=1))  # [B,C,H,W]
+
+    # 2) 构造负样本像素掩膜：弱=前景分支（非前景高置信），强=背景分支（背景高置信），同一 cutmix 对
+    neg_mask = build_bg_consensus_mask_batch(
+        weak_list   =[out_unl_fg, out_l_fg],
+        strong_list =[out_unl_bg, out_l_bg],
+        tau_weak=tau_fg, tau_strong=tau_bg,
+        bg_index=bg_index, assume_multiclass=assume_multiclass
+    )  # [B_total,1,H,W]
+    # 3) 选择锚/负 patch（锚来自 q_m 的低置信，负来自 neg_mask 的高纯度）
+    idx_anchor, idx_neg, u_patch = select_bhc_patches(
+        q_m, neg_mask,
+        topk=topk, patch_size=patch_size, stride=stride, tau_patch=tau_patch
+    )  # idx_anchor:[B,k], idx_neg:[B,Nn], u_patch:[B,N]
+
+    # 若负样本耗尽，bhc_loss 会自动给 0；建议打印 stats 监控
+
+    # 4) 对比特征：融合前 [fg; bg] 的 1x1 投影
+    feat_input = torch.cat([out_fg_batch, out_bg_batch], dim=1)  # [B, C_fg+C_bg, H, W]
+    feat_proj  = proj_head(feat_input)                           # [B, D, H, W]
+
+    # 5) 提取 patch 向量
+    Z_a, Z_n, mask_n_valid = gather_patch_vectors(
+        feat_proj, idx_anchor, idx_neg,
+        patch_size=patch_size, stride=stride
+    )  # Z_a:[B,k,D], Z_n:[B,Nn,D]
+
+    # 6) 锚权重（用不确定度强调困难样本）
+    w_anchor = anchor_weights_from_uncertainty(u_patch, idx_anchor, gamma=gamma_uncert)  # [B,k]
+
+    # 7) 仅推远损失
+    bhc_loss, stats = bhc_repulsive_loss(
+        Z_a, Z_n, mask_n_valid,
+        anchor_weights=w_anchor,
+        margin=margin, temperature=temperature
+    )
+
+
+    # 8) 合并总损失
+    loss = lambda_bhc * bhc_loss
+
+    print({
+        "bhc_loss": float(bhc_loss.item()),
+        "num_anchors": stats["num_anchors"],
+        "num_neg": stats["num_neg"],
+    })
+    return loss
 
 
 def pre_train(args, snapshot_path):
@@ -397,7 +375,7 @@ def pre_train(args, snapshot_path):
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
                                           args.batch_size - args.labeled_bs)
 
-    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
+    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=3, pin_memory=True,
                              worker_init_fn=worker_init_fn)
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
@@ -523,7 +501,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
                                           args.batch_size - args.labeled_bs)
 
-    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
+    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=2, pin_memory=True,
                              worker_init_fn=worker_init_fn)
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
@@ -611,7 +589,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
 
             # conv 3x3 connect
-            output_mix = torch.cat([out_unl, out_l], dim=0)
+            # output_mix = torch.cat([out_unl, out_l], dim=0)
             # output_mix = nn.Conv3d(args.num_classes * 2, args.num_classes, 1, padding=0)
 
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
@@ -624,14 +602,9 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
-            pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=64, patch_size=(8, 8))
-            # 现在形状满足你的要求：
-            #   pos_patches: [B, 16, C] 作为正样本（低置信度）
-            #   neg_patches: [B, L-16, C] 作为负样本
-            bclloss = BCLLoss(pos_patches, neg_patches)
+            bhc_loss = new_contrastive(args, model, [out_unl_fg, out_l_fg, out_unl, out_l, out_unl_bg, out_l_bg])
 
-            loss = loss_dice + loss_ce + consistency_weight * bclloss
-            # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
+            loss = loss_ce + loss_dice + bhc_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -643,9 +616,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             writer.add_scalar('info/total_loss', loss, iter_num)
             writer.add_scalar('info/mix_dice', loss_dice, iter_num)
             writer.add_scalar('info/mix_ce', loss_ce, iter_num)
+            writer.add_scalar('info/bhc_loss', bhc_loss, iter_num)
             writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
 
-            logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
+            logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f, bhc_loss: %f' % (iter_num, loss, loss_dice, loss_ce, bhc_loss))
 
             if iter_num % 20 == 0:
                 image = net_input_unl[1, 0:1, :, :]
@@ -725,14 +699,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_5_1.py', self_snapshot_path)
+    # shutil.copy('./just_try/ACDC/ACDC_train_5_1.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
