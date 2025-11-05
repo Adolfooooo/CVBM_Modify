@@ -201,7 +201,7 @@ class CVBM2d_Argument(nn.Module):
 
         final_out_seg = self.final_seg(torch.cat((out_seg_fg, out_seg_bg), dim=1))
 
-        return out_seg_fg, final_out_seg, out_seg_bg, out_tanh_fg, out_tanh_bg
+        return out_seg_fg, final_out_seg, out_seg_bg, features_fg, features_bg
 
 
 if __name__ == '__main__':
