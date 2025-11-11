@@ -25,7 +25,9 @@ from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
 from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
-from networks.module_try import GDBC
+from networks.module_try.GDBC_v2 import GDBCLossV2
+from just_try.ACDC.ACDC_prediction_heatmap import visualize_predictions
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
@@ -539,17 +541,12 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     logging.info("Start self_training")
     logging.info("{} iterations per epoch".format(len(trainloader)))
 
-    gdbc = GDBC.GDBCLoss(
-        lambda_cv=0.1,
-        lambda_sep=0.1,
-        cos_margin=0.0,         # 让 cos <= 0，约等于正交
-        warmup_steps=1500,
-        use_projection=False,
-        proj_dim=128,
-        use_teacher_probs=True, # 若启用 teacher
-        conf_threshold=0.2      # 忽略极低置信像素（可关）
+    gdbc = GDBCLossV2(
+        lambda_cv=0.5,
+        lambda_sep=0.5,
+        cos_margin=0.6,
+        warmup_steps=1500
     )
-
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
     ce_loss = CrossEntropyLoss()
@@ -617,10 +614,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_unl_fg,out_unl, out_unl_bg, unl_features_fg, unl_features_bg = model(net_input_unl, net_input_unl_s)
+            out_unl_fg, out_unl, out_unl_bg, unl_features_fg, unl_features_bg = model(net_input_unl, net_input_unl_s)
             # out_l_fg,out_l, out_l_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_l_fg,out_l, out_l_bg, l_features_fg, l_features_bg = model(net_input_l, net_input_l_s)
+            out_l_fg, out_l, out_l_bg, l_features_fg, l_features_bg = model(net_input_l, net_input_l_s)
 
             # conv 3x3 connect
             output_mix = torch.cat([out_unl, out_l], dim=0)
@@ -638,19 +635,35 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
+            # out_gdbc_unl = gdbc(
+            #     feats_fg=unl_features_fg[-1],
+            #     feats_bg=unl_features_bg[-1],
+            #     p_fg=out_unl_fg, p_bg=out_unl_bg,
+            #     global_step=iter_num,
+            # )
+
             out_gdbc_unl = gdbc(
-                feats_fg=unl_features_fg[-1],
-                feats_bg=unl_features_bg[-1],
-                p_fg=out_unl_fg, p_bg=out_unl_bg,
+                feats_fg_weak=unl_features_fg[-1],
+                feats_bg_strong=unl_features_bg[-1],
+                feats_bg=out_unl_bg,
+                probs_fg=out_unl_fg,
+                probs_bg=out_unl_bg,
+                # teacher_probs_fg=torch.softmax(pre_a_fg, dim=1),
+                # teacher_probs_bg=torch.softmax(pre_a_bg_s, dim=1),
                 global_step=iter_num,
             )
 
             out_gdbc_l = gdbc(
-                feats_fg=l_features_fg[-1],
-                feats_bg=l_features_bg[-1],
-                p_fg=out_l_fg, p_bg=out_l_bg,
+                feats_fg_weak=l_features_fg[-1],
+                feats_bg_strong=l_features_bg[-1],
+                feats_bg=out_l_bg,
+                probs_fg=out_l_fg,
+                probs_bg=out_l_bg,
+                # teacher_probs_fg=torch.softmax(pre_a_fg, dim=1),
+                # teacher_probs_bg=torch.softmax(pre_a_bg_s, dim=1),
                 global_step=iter_num,
             )
+
             out_gdbc = out_gdbc_unl['loss'] + out_gdbc_l['loss']
             
             pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=64, patch_size=(8, 8))
@@ -679,6 +692,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
+
 
             if iter_num % 20 == 0:
                 image = net_input_unl[1, 0:1, :, :]
@@ -765,7 +779,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
