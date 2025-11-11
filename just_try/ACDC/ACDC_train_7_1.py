@@ -25,9 +25,6 @@ from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
 from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
-from networks.module_try.GDBC_v2 import GDBCLossV2
-from just_try.ACDC.ACDC_prediction_heatmap import visualize_predictions
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
@@ -51,7 +48,9 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_6_1/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_7_1/1', help='snapshot_path')
+parser.add_argument('--fgbs_weight', type=float, default=0.2, help='weight for foreground-guided background suppression')
+parser.add_argument('--fgbs_confidence', type=float, default=0.7, help='confidence threshold for fgbs mask')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -307,6 +306,24 @@ def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, un
 
     return loss_dice, loss_ce
 
+
+def foreground_guided_bg_suppression_loss(fg_logits, bg_logits, confidence_thresh=0.7):
+    """
+    Suppress background decoder activations on high-confidence foreground pixels predicted by the foreground decoder.
+    """
+    with torch.no_grad():
+        fg_probs = F.softmax(fg_logits, dim=1)
+        fg_conf, fg_pred = torch.max(fg_probs, dim=1)
+        confident_fg = (fg_pred != 0) & (fg_conf > confidence_thresh)
+
+    if confident_fg.sum() == 0:
+        return torch.tensor(0.0, device=fg_logits.device)
+
+    bg_target = torch.zeros_like(fg_pred)
+    loss_map = F.cross_entropy(bg_logits, bg_target, reduction='none')
+    confident_mask = confident_fg.float()
+    loss = (loss_map * confident_mask).sum() / (confident_mask.sum() + 1e-6)
+    return loss
 ### provide for label data to get sclice num
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
@@ -437,7 +454,8 @@ def pre_train(args, snapshot_path):
             loss_dice, loss_ce = mix_loss(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
             loss_dice_bg, loss_ce_bg = onehot_mix_loss(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
                                                        unlab=True)
-            loss = (loss_dice + loss_dice_bg + loss_ce + loss_ce_bg) / 2
+            fgbs_loss = foreground_guided_bg_suppression_loss(out_mixl_fg, outputs_mixl_bg, args.fgbs_confidence)
+            loss = (loss_dice + loss_dice_bg + loss_ce + loss_ce_bg) / 2 + args.fgbs_weight * fgbs_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -448,6 +466,7 @@ def pre_train(args, snapshot_path):
             writer.add_scalar('info/total_loss', loss, iter_num)
             writer.add_scalar('info/mix_dice', loss_dice, iter_num)
             writer.add_scalar('info/mix_ce', loss_ce, iter_num)
+            writer.add_scalar('info/fgbs_loss', fgbs_loss, iter_num)
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
@@ -533,20 +552,14 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    load_net(ema_model, pre_trained_model)
-    load_net_opt(model, optimizer, pre_trained_model)
+    # load_net(ema_model, pre_trained_model)
+    # load_net_opt(model, optimizer, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("Start self_training")
     logging.info("{} iterations per epoch".format(len(trainloader)))
 
-    gdbc = GDBCLossV2(
-        lambda_cv=0.5,
-        lambda_sep=0.5,
-        cos_margin=0.6,
-        warmup_steps=1500
-    )
     consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
     ce_loss = CrossEntropyLoss()
@@ -614,10 +627,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             # out_unl_fg,out_unl, out_unl_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_unl_fg, out_unl, out_unl_bg, unl_features_fg, unl_features_bg = model(net_input_unl, net_input_unl_s)
+            out_unl_fg,out_unl, out_unl_bg, _, _ = model(net_input_unl, net_input_unl_s)
             # out_l_fg,out_l, out_l_bg
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
-            out_l_fg, out_l, out_l_bg, l_features_fg, l_features_bg = model(net_input_l, net_input_l_s)
+            out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
 
             # conv 3x3 connect
             output_mix = torch.cat([out_unl, out_l], dim=0)
@@ -635,44 +648,16 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
-            # out_gdbc_unl = gdbc(
-            #     feats_fg=unl_features_fg[-1],
-            #     feats_bg=unl_features_bg[-1],
-            #     p_fg=out_unl_fg, p_bg=out_unl_bg,
-            #     global_step=iter_num,
-            # )
-
-            out_gdbc_unl = gdbc(
-                feats_fg_weak=unl_features_fg[-1],
-                feats_bg_strong=unl_features_bg[-1],
-                feats_bg=out_unl_bg,
-                probs_fg=out_unl_fg,
-                probs_bg=out_unl_bg,
-                # teacher_probs_fg=torch.softmax(pre_a_fg, dim=1),
-                # teacher_probs_bg=torch.softmax(pre_a_bg_s, dim=1),
-                global_step=iter_num,
-            )
-
-            out_gdbc_l = gdbc(
-                feats_fg_weak=l_features_fg[-1],
-                feats_bg_strong=l_features_bg[-1],
-                feats_bg=out_l_bg,
-                probs_fg=out_l_fg,
-                probs_bg=out_l_bg,
-                # teacher_probs_fg=torch.softmax(pre_a_fg, dim=1),
-                # teacher_probs_bg=torch.softmax(pre_a_bg_s, dim=1),
-                global_step=iter_num,
-            )
-
-            out_gdbc = out_gdbc_unl['loss'] + out_gdbc_l['loss']
-            
             pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=64, patch_size=(8, 8))
             # 现在形状满足你的要求：
             #   pos_patches: [B, 16, C] 作为正样本（低置信度）
             #   neg_patches: [B, L-16, C] 作为负样本
             bclloss = BCLLoss(pos_patches, neg_patches)
+            fgbs_unl = foreground_guided_bg_suppression_loss(out_unl_fg, out_unl_bg, args.fgbs_confidence)
+            fgbs_l = foreground_guided_bg_suppression_loss(out_l_fg, out_l_bg, args.fgbs_confidence)
+            fgbs_loss = 0.5 * (fgbs_unl + fgbs_l)
 
-            loss = loss_dice + loss_ce + consistency_weight * bclloss + out_gdbc
+            loss = loss_dice + loss_ce + consistency_weight * bclloss + args.fgbs_weight * fgbs_loss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             optimizer.zero_grad()
@@ -685,24 +670,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             writer.add_scalar('info/total_loss', loss, iter_num)
             writer.add_scalar('info/mix_dice', loss_dice, iter_num)
             writer.add_scalar('info/mix_ce', loss_ce, iter_num)
-            writer.add_scalar('info/unl_loss_cv', out_gdbc_unl["l_cv"], iter_num)
-            writer.add_scalar('info/unl_loss_sep', out_gdbc_unl["l_sep"], iter_num)
-            writer.add_scalar('info/l_loss_cv', out_gdbc_l["l_cv"], iter_num)
-            writer.add_scalar('info/l_loss_sep', out_gdbc_l["l_sep"], iter_num)
             writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
+            writer.add_scalar('info/fgbs_loss', fgbs_loss, iter_num)
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
-
-            
-            # visualize debugger
-            visualize_predictions(
-                image=net_input_l,          # same batch fed into the model
-                pred_main=out_l_fg,         # first output (B, C, H, W)
-                pred_aux=out_l_bg,          # third output (B, C, H, W)
-                batch_idx=0,                # which sample in the batch to visualize
-                save_path=f"fig/iter_{iter_num:05d}_labeled.png",
-                show=False,
-            )
 
             if iter_num % 20 == 0:
                 image = net_input_unl[1, 0:1, :, :]
@@ -782,14 +753,14 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_6_1.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_7_1.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    pre_train(args, pre_snapshot_path)
+    # pre_train(args, pre_snapshot_path)
 
     # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
