@@ -695,14 +695,14 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             
             # visualize debugger
-            visualize_predictions(
-                image=net_input_l,          # same batch fed into the model
-                pred_main=out_l_fg,         # first output (B, C, H, W)
-                pred_aux=out_l_bg,          # third output (B, C, H, W)
-                batch_idx=0,                # which sample in the batch to visualize
-                save_path=f"fig/iter_{iter_num:05d}_labeled.png",
-                show=False,
-            )
+            # visualize_predictions(
+            #     image=net_input_l,          # same batch fed into the model
+            #     pred_main=out_l_fg,         # first output (B, C, H, W)
+            #     pred_aux=out_l_bg,          # third output (B, C, H, W)
+            #     batch_idx=0,                # which sample in the batch to visualize
+            #     save_path=f"fig/iter_{iter_num:05d}_labeled.png",
+            #     show=False,
+            # )
 
             if iter_num % 20 == 0:
                 image = net_input_unl[1, 0:1, :, :]

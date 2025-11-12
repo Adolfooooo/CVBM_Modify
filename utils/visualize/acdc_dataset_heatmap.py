@@ -435,7 +435,7 @@ def main() -> None:
             progress.set_postfix({"rendered": rendered})
 
     logging.info("Finished rendering %d samples.", rendered)
-
+    
 
 if __name__ == "__main__":
     main()

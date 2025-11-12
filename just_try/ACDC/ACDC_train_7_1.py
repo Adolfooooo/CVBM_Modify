@@ -49,8 +49,10 @@ parser.add_argument('--consistency_rampup', type=float, default=200.0, help='con
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
 parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_7_1/1', help='snapshot_path')
-parser.add_argument('--fgbs_weight', type=float, default=0.2, help='weight for foreground-guided background suppression')
-parser.add_argument('--fgbs_confidence', type=float, default=0.7, help='confidence threshold for fgbs mask')
+parser.add_argument('--fgbs_weight', type=float, default=0.2, help='max weight for foreground-guided background suppression')
+parser.add_argument('--fgbs_rampup', type=float, default=6000.0, help='iterations to ramp fgbs weight/threshold')
+parser.add_argument('--fgbs_confidence', type=float, default=0.7, help='late-stage confidence threshold for fgbs mask')
+parser.add_argument('--fgbs_confidence_start', type=float, default=0.9, help='initial confidence threshold for fgbs mask')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -226,6 +228,17 @@ def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return 5 * args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
+def get_current_fgbs_weight(iter_num):
+    if args.fgbs_weight <= 0:
+        return 0.0
+    return args.fgbs_weight * ramps.sigmoid_rampup(iter_num, args.fgbs_rampup)
+
+def get_current_fgbs_threshold(iter_num):
+    start = args.fgbs_confidence_start
+    end = args.fgbs_confidence
+    ramp = ramps.sigmoid_rampup(iter_num, args.fgbs_rampup)
+    return start - (start - end) * ramp
+
 # @torch.no_grad()
 def update_model_ema(model, ema_model, alpha):
     model_state = model.state_dict()
@@ -309,20 +322,23 @@ def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, un
 
 def foreground_guided_bg_suppression_loss(fg_logits, bg_logits, confidence_thresh=0.7):
     """
-    Suppress background decoder activations on high-confidence foreground pixels predicted by the foreground decoder.
+    Encourage the background decoder to model the complementary distribution
+    of high-confidence foreground predictions.
     """
     with torch.no_grad():
         fg_probs = F.softmax(fg_logits, dim=1)
         fg_conf, fg_pred = torch.max(fg_probs, dim=1)
         confident_fg = (fg_pred != 0) & (fg_conf > confidence_thresh)
+        complement_probs = (1.0 - fg_probs).clamp_min(1e-6)
+        complement_probs = complement_probs / complement_probs.sum(dim=1, keepdim=True)
 
     if confident_fg.sum() == 0:
         return torch.tensor(0.0, device=fg_logits.device)
 
-    bg_target = torch.zeros_like(fg_pred)
-    loss_map = F.cross_entropy(bg_logits, bg_target, reduction='none')
+    bg_log_probs = F.log_softmax(bg_logits, dim=1)
+    kl_map = F.kl_div(bg_log_probs, complement_probs, reduction='none').sum(dim=1)
     confident_mask = confident_fg.float()
-    loss = (loss_map * confident_mask).sum() / (confident_mask.sum() + 1e-6)
+    loss = (kl_map * confident_mask).sum() / (confident_mask.sum() + 1e-6)
     return loss
 ### provide for label data to get sclice num
 def patients_to_slices(dataset, patiens_num):
@@ -454,8 +470,10 @@ def pre_train(args, snapshot_path):
             loss_dice, loss_ce = mix_loss(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
             loss_dice_bg, loss_ce_bg = onehot_mix_loss(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
                                                        unlab=True)
-            fgbs_loss = foreground_guided_bg_suppression_loss(out_mixl_fg, outputs_mixl_bg, args.fgbs_confidence)
-            loss = (loss_dice + loss_dice_bg + loss_ce + loss_ce_bg) / 2 + args.fgbs_weight * fgbs_loss
+            fgbs_threshold = get_current_fgbs_threshold(iter_num)
+            fgbs_weight = get_current_fgbs_weight(iter_num)
+            fgbs_loss = foreground_guided_bg_suppression_loss(out_mixl_fg, outputs_mixl_bg, fgbs_threshold)
+            loss = (loss_dice + loss_dice_bg + loss_ce + loss_ce_bg) / 2 + fgbs_weight * fgbs_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -467,6 +485,7 @@ def pre_train(args, snapshot_path):
             writer.add_scalar('info/mix_dice', loss_dice, iter_num)
             writer.add_scalar('info/mix_ce', loss_ce, iter_num)
             writer.add_scalar('info/fgbs_loss', fgbs_loss, iter_num)
+            writer.add_scalar('info/fgbs_weight', fgbs_weight, iter_num)
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
@@ -615,6 +634,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
                 l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
             consistency_weight = get_current_consistency_weight(iter_num // 150)
+            fgbs_threshold = get_current_fgbs_threshold(iter_num)
+            fgbs_weight = get_current_fgbs_weight(iter_num)
             # net_input_unl, net_input_l
             # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
             net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
@@ -653,11 +674,11 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             #   pos_patches: [B, 16, C] 作为正样本（低置信度）
             #   neg_patches: [B, L-16, C] 作为负样本
             bclloss = BCLLoss(pos_patches, neg_patches)
-            fgbs_unl = foreground_guided_bg_suppression_loss(out_unl_fg, out_unl_bg, args.fgbs_confidence)
-            fgbs_l = foreground_guided_bg_suppression_loss(out_l_fg, out_l_bg, args.fgbs_confidence)
+            fgbs_unl = foreground_guided_bg_suppression_loss(out_unl_fg, out_unl_bg, fgbs_threshold)
+            fgbs_l = foreground_guided_bg_suppression_loss(out_l_fg, out_l_bg, fgbs_threshold)
             fgbs_loss = 0.5 * (fgbs_unl + fgbs_l)
 
-            loss = loss_dice + loss_ce + consistency_weight * bclloss + args.fgbs_weight * fgbs_loss
+            loss = loss_dice + loss_ce + consistency_weight * bclloss + fgbs_weight * fgbs_loss
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             optimizer.zero_grad()
@@ -672,6 +693,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             writer.add_scalar('info/mix_ce', loss_ce, iter_num)
             writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
             writer.add_scalar('info/fgbs_loss', fgbs_loss, iter_num)
+            writer.add_scalar('info/fgbs_weight', fgbs_weight, iter_num)
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
