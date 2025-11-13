@@ -48,11 +48,11 @@ class BaseDataSets(Dataset):
             h5f = h5py.File(self._base_dir + "/data/{}.h5".format(case), 'r')
         image = h5f['image'][:]
         label = h5f['label'][:]
-        sample = {'image': image, 'label': label}
+        sample = {'image': image, 'label': label, 'case': case}
         if self.split == "train":
             sample = self.transform(sample)
-        # sample["idx"] = idx
-        sample['case'] = case
+            # 保留病例标识，供自适应混合/置信度模块使用
+            sample['case'] = case
         return sample
 
 def random_rot_flip(image, label):
