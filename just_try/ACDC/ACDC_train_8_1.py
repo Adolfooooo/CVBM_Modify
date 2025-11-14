@@ -51,10 +51,10 @@ parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
 parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_8_1/1', help='snapshot_path')
 parser.add_argument('--cgmc_min_ratio', type=float, default=0.3, help='minimum masked area ratio for CGMC')
-parser.add_argument('--cgmc_max_ratio', type=float, default=0.7, help='maximum masked area ratio for CGMC')
+parser.add_argument('--cgmc_max_ratio', type=float, default=0.5, help='maximum masked area ratio for CGMC')
 parser.add_argument('--cgmc_threshold_low', type=float, default=0.55, help='initial confidence threshold')
-parser.add_argument('--cgmc_threshold_high', type=float, default=0.85, help='late-stage confidence threshold')
-parser.add_argument('--cgmc_threshold_ramp', type=float, default=6000.0, help='iterations to ramp confidence threshold')
+parser.add_argument('--cgmc_threshold_high', type=float, default=0.75, help='late-stage confidence threshold')
+parser.add_argument('--cgmc_threshold_ramp', type=float, default=12000.0, help='iterations to ramp confidence threshold')
 parser.add_argument('--cgmc_conf_momentum', type=float, default=0.9, help='EMA momentum for confidence tracker')
 parser.add_argument('--cgmc_low_conf_weight', type=float, default=0.5, help='relative weight for low-confidence supervision')
 parser.add_argument('--band_inner', type=int, default=3, help='inner kernel for boundary band erosion')
@@ -264,7 +264,9 @@ def generate_confidence_guided_mask(conf_maps, mean_scores, num_classes, min_rat
     for idx in range(batch):
         conf = conf_maps[idx, 0]
         mean_conf = mean_scores[idx].clamp(0.0, 1.0).item()
-        ratio = min_ratio + (max_ratio - min_ratio) * mean_conf
+        # 限制调幅：将>0.6的高置信度映射为常数，以避免70%遮挡
+        scaled_conf = min(mean_conf, 0.6) / 0.6
+        ratio = min_ratio + (max_ratio - min_ratio) * scaled_conf
         ratio = float(np.clip(ratio, min_ratio, max_ratio))
         patch_h = max(1, int(height * np.sqrt(ratio)))
         patch_w = max(1, int(width * np.sqrt(ratio)))
@@ -834,7 +836,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             pos_patches, neg_patches = select_patches_for_contrast(
                 output_mix, topnum=64, patch_size=(8, 8), focus_mask=low_focus
             )
-            low_ratio = low_focus.mean()
+            # 将对比损失权重限制在[0.2,0.6], 防止全图低置信时代价失控
+            low_ratio = low_focus.mean().clamp(0.2, 0.6)
             bclloss = BCLLoss(pos_patches, neg_patches) * low_ratio
 
             fg_mask_a = (plab_a_fg > 0).float().unsqueeze(1) * high_a
