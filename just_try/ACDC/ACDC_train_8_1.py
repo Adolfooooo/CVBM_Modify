@@ -56,10 +56,15 @@ parser.add_argument('--cgmc_threshold_low', type=float, default=0.55, help='init
 parser.add_argument('--cgmc_threshold_high', type=float, default=0.75, help='late-stage confidence threshold')
 parser.add_argument('--cgmc_threshold_ramp', type=float, default=12000.0, help='iterations to ramp confidence threshold')
 parser.add_argument('--cgmc_conf_momentum', type=float, default=0.9, help='EMA momentum for confidence tracker')
-parser.add_argument('--cgmc_low_conf_weight', type=float, default=0.5, help='relative weight for low-confidence supervision')
+parser.add_argument('--cgmc_low_conf_start', type=float, default=0.4, help='initial weight for low-confidence supervision')
+parser.add_argument('--cgmc_low_conf_end', type=float, default=0.8, help='late-stage weight for low-confidence supervision')
+parser.add_argument('--cgmc_low_conf_ramp', type=float, default=15000.0, help='iterations to ramp low-confidence weight')
 parser.add_argument('--band_inner', type=int, default=3, help='inner kernel for boundary band erosion')
 parser.add_argument('--band_outer', type=int, default=7, help='outer kernel for boundary band dilation')
 parser.add_argument('--band_kl_weight', type=float, default=0.05, help='weight of boundary KL between fg/bg heads')
+parser.add_argument('--ema_alpha_high', type=float, default=0.99, help='initial EMA decay')
+parser.add_argument('--ema_alpha_low', type=float, default=0.97, help='late-stage EMA decay')
+parser.add_argument('--ema_alpha_ramp', type=float, default=15000.0, help='iterations to adjust EMA decay')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -244,6 +249,19 @@ def cgmc_confidence_threshold(iteration, args):
     return args.cgmc_threshold_low + (args.cgmc_threshold_high - args.cgmc_threshold_low) * ramp
 
 
+def cgmc_low_conf_scale(iteration, args):
+    """
+    模块功能: 计算低置信伪标签区域的权重, 逐步从保守到激进。
+    输入:
+        iteration (int): 当前迭代编号。
+        args (Namespace): 训练参数集合, 提供起始/终止权重。
+    输出:
+        float: 当前迭代下的低置信权重, 落在[start, end]区间。
+    """
+    ramp = min(1.0, iteration / max(1.0, args.cgmc_low_conf_ramp))
+    return args.cgmc_low_conf_start + (args.cgmc_low_conf_end - args.cgmc_low_conf_start) * ramp
+
+
 def generate_confidence_guided_mask(conf_maps, mean_scores, num_classes, min_ratio, max_ratio):
     """
     模块功能: 根据置信度图生成自适应Mix掩码, 控制遮挡比例与位置。
@@ -391,6 +409,19 @@ def update_model_ema(model, ema_model, alpha):
     for key in model_state:
         new_dict[key] = alpha * model_ema_state[key] + (1 - alpha) * model_state[key]
     ema_model.load_state_dict(new_dict)
+
+
+def get_current_ema_alpha(iteration, args):
+    """
+    模块功能: 动态调整EMA的指数衰减系数, 让teacher在中后期更快跟随student。
+    输入:
+        iteration (int): 当前迭代编号。
+        args (Namespace): 包含EMA起止参数。
+    输出:
+        float: 当前EMA alpha, 范围[ema_alpha_low, ema_alpha_high]。
+    """
+    ramp = min(1.0, iteration / max(1.0, args.ema_alpha_ramp))
+    return args.ema_alpha_high - (args.ema_alpha_high - args.ema_alpha_low) * ramp
 
 
 def generate_mask(img, number_class):
@@ -790,6 +821,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
                 mean_b = smooth_mean[unlabeled_sub_bs:]
 
                 threshold = cgmc_confidence_threshold(iter_num, args)
+                low_conf_scale = cgmc_low_conf_scale(iter_num, args)
                 high_a, low_a = build_confidence_masks(conf_a, threshold)
                 high_b, low_b = build_confidence_masks(conf_b, threshold)
 
@@ -816,12 +848,12 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             unl_dice, unl_ce = confidence_weighted_mix_loss(
                 out_unl_fg, plab_a_fg, lab_a, mask_a, high_a, low_a,
                 unlabeled_region="primary", l_weight=1.0, u_weight=args.u_weight,
-                low_conf_scale=args.cgmc_low_conf_weight
+                low_conf_scale=low_conf_scale
             )
             l_dice, l_ce = confidence_weighted_mix_loss(
                 out_l_fg, lab_b, plab_b_fg, mask_b, high_b, low_b,
                 unlabeled_region="secondary", l_weight=1.0, u_weight=args.u_weight,
-                low_conf_scale=args.cgmc_low_conf_weight
+                low_conf_scale=low_conf_scale
             )
 
             unl_dice_bg, unl_ce_bg = onehot_mix_loss(
@@ -856,7 +888,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss.backward()
             optimizer.step()
             iter_num += 1
-            update_model_ema(model, ema_model, 0.99)
+            current_alpha = get_current_ema_alpha(iter_num, args)
+            update_model_ema(model, ema_model, current_alpha)
 
             writer.add_scalar('info/total_loss', loss, iter_num)
             writer.add_scalar('info/fg_loss', loss_fg, iter_num)
@@ -864,6 +897,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             writer.add_scalar('info/band_loss', band_loss, iter_num)
             writer.add_scalar('info/bcl_loss', bclloss, iter_num)
             writer.add_scalar('info/conf_threshold', threshold, iter_num)
+            writer.add_scalar('info/low_conf_scale', low_conf_scale, iter_num)
+            writer.add_scalar('info/ema_alpha', current_alpha, iter_num)
 
             if iter_num % 20 == 0:
                 writer.add_image('train/Un_Image', net_input_unl[0, 0:1], iter_num)
