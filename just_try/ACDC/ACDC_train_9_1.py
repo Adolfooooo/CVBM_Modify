@@ -1,5 +1,4 @@
 import argparse
-
 import logging
 
 import os
@@ -23,33 +22,42 @@ from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
-from utils import losses, ramps, feature_memory, contrastive_losses, val_2d
-from visual_ACDC import ModelVisualizer
+from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
+from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/ACDC/ACDC_ABD', help='Name of Experiment')
+parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
-parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
+parser.add_argument('--batch_size', type=int, default=12, help='batch_size per gpu')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
 # label and unlabel
-parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=6, help='labeled_batch_size per gpu')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
-parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--consistency', type=float, default=0.1, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_ACDC_4_2_2_pre_train/1', help='snapshot_path')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_3/1', help='snapshot_path')
+parser.add_argument('--proto_dim', type=int, default=64, help='projection dimension for prototype learning')
+parser.add_argument('--proto_patch', type=int, default=8, help='patch size used by prototype pooling')
+parser.add_argument('--proto_bg_clusters', type=int, default=4, help='number of prototypes for background memory')
+parser.add_argument('--proto_momentum', type=float, default=0.9, help='momentum used to update prototypes')
+parser.add_argument('--proto_temperature', type=float, default=0.1, help='temperature for prototype contrastive losses')
+parser.add_argument('--fg_conf_thresh', type=float, default=0.65, help='confidence threshold when updating foreground prototypes')
+parser.add_argument('--bg_conf_thresh', type=float, default=0.7, help='confidence threshold when updating background prototypes')
+parser.add_argument('--lambda_neg', type=float, default=0.5, help='weight of negative contrastive loss for background')
+parser.add_argument('--lambda_proto', type=float, default=0.5, help='weight of prototype contrastive loss for foreground')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -57,6 +65,13 @@ self_max_iterations = args.max_iterations
 dice_loss = losses.DiceLoss(n_classes=4)
 onehot_dice_loss = losses.DiceLoss2d(n_classes=4)
 onehot_ce_loss=losses.CrossEntropyLoss(n_classes=4)
+alpha = 0.99
+num_classes = args.num_classes
+dynamic_threshold_bg = [1/num_classes for i in range(4)]
+dynamic_threshold_fg = [1/num_classes for i in range(4)]
+dynamic_threshold_class = [1/num_classes for i in range(args.num_classes)]
+plt_bg, plt_fg = {}, {}
+
 
 
 def load_net(net, path):
@@ -68,10 +83,6 @@ def load_net_opt(net, optimizer, path):
     state = torch.load(str(path))
     net.load_state_dict(state['net'])
     optimizer.load_state_dict(state['opt'])
-
-def load_self_net_opt(net, path):
-    net.load_state_dict(torch.load(str(path)))
-
 
 
 def save_net_opt(net, optimizer, path):
@@ -120,9 +131,12 @@ def get_ACDC_2DLargestCC(segmentation):
 
 
 def get_ACDC_2DLargestCC_onehot(segmentation):
+    '''
+    inputs: segementation: BxHxW, indices
+    '''
     batch_list = []
-    N = segmentation.shape[0]
-    for i in range(0, N):
+    batch_num = segmentation.shape[0]
+    for i in range(0, batch_num):
         class_list = []
         for c in range(0, 4):
             temp_seg = segmentation[i]  # == c *  torch.ones_like(segmentation[i])
@@ -143,20 +157,83 @@ def get_ACDC_2DLargestCC_onehot(segmentation):
 
 def get_ACDC_masks(output, nms=0,onehot=False):
     probs = F.softmax(output, dim=1)
-    _, probs = torch.max(probs, dim=1)
+    probs, indices = torch.max(probs, dim=1)
+
     if nms == 1:
         if onehot:
-            probs = get_ACDC_2DLargestCC_onehot(probs)
+            probs = get_ACDC_2DLargestCC_onehot(indices)
         else:
-            probs = get_ACDC_2DLargestCC(probs)
+            probs = get_ACDC_2DLargestCC(indices)
     return probs
+
+def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
+    probs = F.softmax(output, dim=1)
+    probs, indices = torch.max(probs, dim=1)
+    confidence_foreground_selection(probs, indices, threshold=0.5)
+    if nms == 1:
+        if onehot:
+            indices = get_ACDC_2DLargestCC_onehot(indices)
+        else:
+            indices = get_ACDC_2DLargestCC(indices)
+    return indices
+
+def confidence_foreground_selection(segmentation, indices, threshold): 
+    """
+    基于置信度的前景模块选择
+    
+    Args:
+
+        threshold: list - 置信度阈值
+    
+    Returns:
+        torch.Tensor, shape (B, H, W) - 过滤后的类别标签（低置信度区域设为0背景）
+    """
+    # 创建置信度掩码：只有高于阈值的像素被认为是前景
+    confidence_mask = segmentation > threshold
+    
+    # 应用置信度掩码：低置信度区域设为背景标签0
+    filtered_indices = indices * confidence_mask
+    
+    return filtered_indices
+
+
+def generate_pseudo_labels_with_confidence(predictions, class_thresholds):
+    """
+    根据类别阈值生成伪标签
+    
+    Args:
+            模型的预测输出（softmax 概率或者 sigmoid 后的置信度）。
+        class_thresholds: list or torch.Tensor, shape (C,)
+            每个类别对应的阈值。
+    
+    Returns:
+        torch.Tensor, shape (B, H, W, D)
+            伪标签（低于对应类别阈值的像素设为0）
+    """
+    B, C, H, W = predictions.shape
+    if not torch.is_tensor(class_thresholds):
+        class_thresholds = torch.tensor(class_thresholds, device=predictions.device, dtype=predictions.dtype)
+
+    # (B, H, W) 取每个像素的最大概率类别
+    probs, pred_classes = torch.max(predictions, dim=1)  # probs: (B,H,W), pred_classes: (B,H,W)
+
+    # 获取每个像素对应的类别阈值
+    thresholds = class_thresholds[pred_classes]  # (B,H,W)
+
+    # 判断是否超过类别阈值
+    mask = probs > thresholds  # (B,H,W)
+
+    # 应用阈值过滤，低置信度设为背景（0）
+    pseudo_labels = pred_classes * mask
+
+    return pseudo_labels
 
 
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return 5 * args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
-
+# @torch.no_grad()
 def update_model_ema(model, ema_model, alpha):
     model_state = model.state_dict()
     model_ema_state = ema_model.state_dict()
@@ -250,13 +327,187 @@ def patients_to_slices(dataset, patiens_num):
     return ref_dict[str(patiens_num)]
 
 
+def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose_largest=False):
+    """
+    output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
+    返回:
+      pos_patches: [B, topnum, C]
+      neg_patches: [B, L-topnum, C]
+    """
+    B, C, H, W = output_mix.shape
+    ph, pw = patch_size
+    assert H % ph == 0 and W % pw == 0, "H/W 必须能被 patch_size 整除（不重叠 patch）"
+
+    # 1) 概率 & 置信度图
+    probs = F.softmax(output_mix, dim=1)          # [B, C, H, W]
+    score = probs.max(dim=1, keepdim=True).values # [B, 1, H, W]
+
+    # 2) 用 unfold 把置信度图切 patch，并做均值 -> 每个 patch 的置信度
+    # unfold 输出 [B, patch_area, L]，L 为 patch 个数
+    score_patches = F.unfold(score, kernel_size=(ph, pw), stride=(ph, pw))  # [B, ph*pw, L]
+    patch_conf = score_patches.mean(dim=1)                                   # [B, L]
+
+    # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
+    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)        # [B, topnum]
+    B_, L = patch_conf.shape
+    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
+    mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
+    mask.scatter_(1, top_idx, False)                                          # 正样本位置设为 False
+    # 剩余的就是负样本
+    num_neg = L - topnum
+
+    # 4) 切特征图并对齐到 [B, L, C]（每个 patch 一个向量，features_dim=C）
+    # 对概率图做 unfold: [B, C*ph*pw, L] -> [B, C, ph*pw, L] -> 在 patch 内做均值 -> [B, C, L] -> [B, L, C]
+    feat_patches = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))     # [B, C*ph*pw, L]
+    feat_patches = feat_patches.view(B, C, ph*pw, L).mean(dim=2)              # [B, C, L]
+    feat_patches = feat_patches.permute(0, 2, 1).contiguous()                 # [B, L, C]
+
+    # 5) 基于索引/掩码取出正负 patch，得到 [B, patchnum, features_dim]
+    # 正样本（最低置信度的 topnum 个）
+    pos_patches = torch.gather(
+        feat_patches, dim=1,
+        index=top_idx.unsqueeze(-1).expand(-1, -1, C)                         # [B, topnum, C]
+    )                                                                          # -> [B, topnum, C]
+
+    # 负样本（其余 patch）
+    # 用布尔掩码批量选择，再 reshape 回 [B, L-topnum, C]
+    neg_patches = feat_patches[mask].view(B, num_neg, C)                      # [B, L-topnum, C]
+
+    return pos_patches, neg_patches
+
+
+class ForegroundPrototypeMemory:
+    def __init__(self, num_classes, feat_dim, momentum=0.9):
+        self.num_classes = num_classes
+        self.feat_dim = feat_dim
+        self.momentum = momentum
+        self.prototypes = None
+        self.initialized = None
+
+    def _maybe_init(self, device):
+        if self.prototypes is None:
+            self.prototypes = torch.zeros(self.num_classes, self.feat_dim, device=device)
+            self.initialized = torch.zeros(self.num_classes, device=device, dtype=torch.bool)
+
+    def update(self, class_ids, feats):
+        if feats.numel() == 0 or class_ids.numel() == 0:
+            return
+        self._maybe_init(feats.device)
+        feats = F.normalize(feats, dim=1)
+        for cls in range(self.num_classes):
+            mask = class_ids == cls
+            if mask.any():
+                proto = feats[mask].mean(dim=0)
+                if self.initialized[cls]:
+                    self.prototypes[cls] = self.momentum * self.prototypes[cls] + (1 - self.momentum) * proto
+                else:
+                    self.prototypes[cls] = proto
+                    self.initialized[cls] = True
+        self.prototypes = F.normalize(self.prototypes, dim=1)
+
+    def get(self, device):
+        if self.prototypes is None or not self.initialized.any():
+            return None
+        return self.prototypes.to(device)
+
+
+class BackgroundPrototypeMemory:
+    def __init__(self, num_proto, feat_dim, momentum=0.9):
+        self.num_proto = num_proto
+        self.feat_dim = feat_dim
+        self.momentum = momentum
+        self.prototypes = None
+        self.initialized = False
+
+    def _maybe_init(self, device):
+        if self.prototypes is None:
+            self.prototypes = torch.zeros(self.num_proto, self.feat_dim, device=device)
+            self.filled = 0
+
+    def update(self, feats):
+        if feats.numel() == 0:
+            return
+        self._maybe_init(feats.device)
+        feats = F.normalize(feats, dim=1)
+        if not self.initialized:
+            required = min(self.num_proto - self.filled, feats.shape[0])
+            if required > 0:
+                self.prototypes[self.filled:self.filled + required] = feats[:required]
+                self.filled += required
+            if self.filled >= self.num_proto:
+                self.initialized = True
+            return
+        sim = torch.matmul(feats, self.prototypes.t())
+        assign = torch.argmax(sim, dim=1)
+        for idx in range(self.num_proto):
+            mask = assign == idx
+            if mask.any():
+                proto = feats[mask].mean(dim=0)
+                self.prototypes[idx] = self.momentum * self.prototypes[idx] + (1 - self.momentum) * proto
+        self.prototypes = F.normalize(self.prototypes, dim=1)
+
+    def get(self, device):
+        if self.prototypes is None or not self.initialized:
+            return None
+        return self.prototypes.to(device)
+
+
+class PatchProjector(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.proj = nn.Conv2d(in_dim, out_dim, kernel_size=1)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+def compute_patch_descriptors(logits, projector, patch_size):
+    probs = torch.softmax(logits, dim=1)
+    feats = projector(probs)
+    feats = F.normalize(feats, dim=1)
+    B, C, H, W = feats.shape
+    ph, pw = patch_size
+    assert H % ph == 0 and W % pw == 0, "Patch size must divide feature map size."
+    patch_tokens = F.unfold(feats, kernel_size=(ph, pw), stride=(ph, pw))
+    patch_tokens = patch_tokens.view(B, C, ph * pw, -1).mean(dim=2)  # B x C x L
+    patch_feats = patch_tokens.permute(0, 2, 1).reshape(-1, C)
+
+    prob_tokens = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))
+    prob_tokens = prob_tokens.view(B, probs.shape[1], ph * pw, -1).mean(dim=2)
+    patch_conf, patch_labels = torch.max(prob_tokens, dim=1)
+    patch_conf = patch_conf.reshape(-1)
+    patch_labels = patch_labels.reshape(-1)
+    return patch_feats, patch_labels, patch_conf
+
+
+def foreground_proto_contrast(feats, labels, proto_memory, temperature):
+    device = feats.device
+    prototypes = proto_memory.get(device) if proto_memory is not None else None
+    if prototypes is None or feats.numel() == 0:
+        return torch.tensor(0.0, device=device)
+    feats = F.normalize(feats, dim=1)
+    logits = torch.matmul(feats, prototypes.t()) / temperature
+    loss = F.cross_entropy(logits, labels)
+    return loss
+
+
+def background_negative_contrast(feats, proto_memory, temperature):
+    device = feats.device
+    prototypes = proto_memory.get(device) if proto_memory is not None else None
+    if prototypes is None or feats.numel() == 0:
+        return torch.tensor(0.0, device=device)
+    feats = F.normalize(feats, dim=1)
+    logits = torch.matmul(feats, prototypes.t()) / temperature
+    loss = torch.logsumexp(logits, dim=1).mean()
+    return loss
+
+
 def pre_train(args, snapshot_path):
     base_lr = args.base_lr
     num_classes = args.num_classes
     max_iterations = args.max_iterations
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
-    
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
         
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train_4_1")
@@ -374,62 +625,12 @@ def pre_train(args, snapshot_path):
     writer.close()
 
 
-def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose_largest=False):
-    """
-    output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
-    返回:
-      pos_patches: [B, topnum, C]
-      neg_patches: [B, L-topnum, C]
-    """
-    B, C, H, W = output_mix.shape
-    ph, pw = patch_size
-    assert H % ph == 0 and W % pw == 0, "H/W 必须能被 patch_size 整除（不重叠 patch）"
-
-    # 1) 概率 & 置信度图
-    probs = F.softmax(output_mix, dim=1)          # [B, C, H, W]
-    score = probs.max(dim=1, keepdim=True).values # [B, 1, H, W]
-
-    # 2) 用 unfold 把置信度图切 patch，并做均值 -> 每个 patch 的置信度
-    # unfold 输出 [B, patch_area, L]，L 为 patch 个数
-    score_patches = F.unfold(score, kernel_size=(ph, pw), stride=(ph, pw))  # [B, ph*pw, L]
-    patch_conf = score_patches.mean(dim=1)                                   # [B, L]
-
-    # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
-    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)        # [B, topnum]
-    B_, L = patch_conf.shape
-    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
-    mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
-    mask.scatter_(1, top_idx, False)                                          # 正样本位置设为 False
-    # 剩余的就是负样本
-    num_neg = L - topnum
-
-    # 4) 切特征图并对齐到 [B, L, C]（每个 patch 一个向量，features_dim=C）
-    # 对概率图做 unfold: [B, C*ph*pw, L] -> [B, C, ph*pw, L] -> 在 patch 内做均值 -> [B, C, L] -> [B, L, C]
-    feat_patches = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))     # [B, C*ph*pw, L]
-    feat_patches = feat_patches.view(B, C, ph*pw, L).mean(dim=2)              # [B, C, L]
-    feat_patches = feat_patches.permute(0, 2, 1).contiguous()                 # [B, L, C]
-
-    # 5) 基于索引/掩码取出正负 patch，得到 [B, patchnum, features_dim]
-    # 正样本（最低置信度的 topnum 个）
-    pos_patches = torch.gather(
-        feat_patches, dim=1,
-        index=top_idx.unsqueeze(-1).expand(-1, -1, C)                         # [B, topnum, C]
-    )                                                                          # -> [B, topnum, C]
-
-    # 负样本（其余 patch）
-    # 用布尔掩码批量选择，再 reshape 回 [B, L-topnum, C]
-    neg_patches = feat_patches[mask].view(B, num_neg, C)                      # [B, L-topnum, C]
-
-    return pos_patches, neg_patches
-
-
-def self_train_visual(args, pre_snapshot_path, snapshot_path):
+def self_train(args, pre_snapshot_path, snapshot_path):
     base_lr = args.base_lr
     num_classes = args.num_classes
     max_iterations = args.max_iterations
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
-    self_trained_model = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
 
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
@@ -462,29 +663,27 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
 
-    optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    projector = PatchProjector(num_classes, args.proto_dim).cuda()
+    fg_proto_memory = ForegroundPrototypeMemory(num_classes - 1, args.proto_dim, args.proto_momentum)
+    bg_proto_memory = BackgroundPrototypeMemory(args.proto_bg_clusters, args.proto_dim, args.proto_momentum)
+    patch_tuple = (args.proto_patch, args.proto_patch)
+
+    optimizer = optim.SGD(list(model.parameters()) + list(projector.parameters()), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
-    # load_net(ema_model, pre_trained_model)
-    load_self_net_opt(model, self_trained_model)
+    load_net(ema_model, pre_trained_model)
+    load_net(model, pre_trained_model)
     logging.info("Loaded from {}".format(pre_trained_model))
 
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("Start self_training")
     logging.info("{} iterations per epoch".format(len(trainloader)))
 
-    consistency_criterion = losses.mse_loss
-    BCLLoss = losses.BlockContrastiveLoss()
-    ce_loss = CrossEntropyLoss()
-
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
     best_performance = 0.0
     ema_best_performance = 0.0
     best_hd = 100
-    iterator = tqdm(range(max_epoch), ncols=70)
-
-    # 初始化可视化器
-    visualizer = ModelVisualizer(self_trained_model, num_classes=4)
+    iterator = tqdm(range(max_epoch), ncols=70)    
     for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
@@ -498,7 +697,6 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             volume_batch, label_batch, onehot_label_batch = volume_batch.cuda(), label_batch.cuda(), onehot_label_batch.cuda()
             volume_batch_strong, label_batch_strong, onehot_label_batch_strong = \
                 volume_batch_strong.cuda(), label_batch_strong.cuda(), onehot_label_batch_strong.cuda()
-
 
             img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
             uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
@@ -520,18 +718,29 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             with torch.no_grad():
                 pre_a_fg,pre_a, pre_a_bg_s, _, _ = ema_model(uimg_a, uimg_a_s)
                 pre_b_fg,pre_b, pre_b_bg_s, _, _ = ema_model(uimg_b, uimg_b_s)
-                # plab_a = get_ACDC_masks(pre_a, nms=1)
-                # plab_b = get_ACDC_masks(pre_b, nms=1)
-                plab_a_fg = get_ACDC_masks(pre_a_fg, nms=1)
-                plab_b_fg = get_ACDC_masks(pre_b_fg, nms=1)
-                
-                plab_a_bg_s = get_ACDC_masks(pre_a_bg_s, nms=1,onehot=True)
-                plab_b_bg_s = get_ACDC_masks(pre_b_bg_s, nms=1,onehot=True)
+
+                plab_a_fg = get_ACDC_masks_with_confidence(pre_a_fg, nms=1)
+                plab_b_fg = get_ACDC_masks_with_confidence(pre_b_fg, nms=1)
+
+                plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks_with_confidence(pre_b_bg_s, nms=1,onehot=True)
                 
                 img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
                 unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
                 l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
-            consistency_weight = get_current_consistency_weight(iter_num // 150)
+                teacher_fg_logits = torch.cat([pre_a_fg, pre_b_fg], dim=0).detach()
+                fg_feats_teacher, fg_labels_teacher, fg_conf_teacher = compute_patch_descriptors(
+                    teacher_fg_logits, projector, patch_tuple)
+                fg_mask_teacher = (fg_labels_teacher > 0) & (fg_conf_teacher > args.fg_conf_thresh)
+                if fg_mask_teacher.any():
+                    fg_proto_memory.update(fg_labels_teacher[fg_mask_teacher] - 1, fg_feats_teacher[fg_mask_teacher])
+
+                teacher_bg_logits = torch.cat([pre_a_bg_s, pre_b_bg_s], dim=0).detach()
+                bg_feats_teacher, bg_labels_teacher, bg_conf_teacher = compute_patch_descriptors(
+                    teacher_bg_logits, projector, patch_tuple)
+                bg_mask_teacher = (bg_labels_teacher == 0) & (bg_conf_teacher > args.bg_conf_thresh)
+                if bg_mask_teacher.any():
+                    bg_proto_memory.update(bg_feats_teacher[bg_mask_teacher])
             # net_input_unl, net_input_l
             # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
             net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
@@ -549,9 +758,6 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
             out_l_fg,out_l, out_l_bg, _, _ = model(net_input_l, net_input_l_s)
 
-            # conv 3x3 connect
-            output_mix = torch.cat([out_unl, out_l], dim=0)
-
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
 
@@ -562,43 +768,27 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
-            topnum=16
-            out_soft_mix = F.softmax(output_mix, dim=1)
-            score = torch.max(out_soft_mix, dim=1)[0]
-            patches_outputs_1 = rearrange(score, 'b (h p1) (w p2)->b (h w) (p1 p2)', p1=4, p2=4)
-            patches_mean_1_top_values, patches_mean_1_top_indices = patches_outputs_1.topk(topnum, dim=1, largest=False)
-            total_patch = patches_outputs_1.shape[1]
-            patches_mean_1_remaining_values, patches_mean_1_remaining_indices = patches_outputs_1.topk(total_patch-16, dim=1)
-            
-            bclloss = BCLLoss(patches_mean_1_top_values, patches_mean_1_remaining_values)
+            student_fg_logits = torch.cat([out_unl_fg, out_l_fg], dim=0)
+            fg_feats_student, fg_labels_student, _ = compute_patch_descriptors(student_fg_logits, projector, patch_tuple)
+            fg_mask_student = fg_labels_student > 0
+            fg_proto_loss = foreground_proto_contrast(
+                fg_feats_student[fg_mask_student],
+                fg_labels_student[fg_mask_student] - 1,
+                fg_proto_memory,
+                args.proto_temperature
+            )
 
-            # pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4))
-            # # 现在形状满足你的要求：
-            # #   pos_patches: [B, 16, C] 作为正样本（低置信度）
-            # #   neg_patches: [B, L-16, C] 作为负样本
-            # bclloss = BCLLoss(pos_patches, neg_patches)
+            student_bg_logits = torch.cat([out_unl_bg, out_l_bg], dim=0)
+            bg_feats_student, bg_labels_student, _ = compute_patch_descriptors(student_bg_logits, projector, patch_tuple)
+            bg_mask_student = bg_labels_student == 0
+            bg_neg_loss = background_negative_contrast(
+                bg_feats_student[bg_mask_student],
+                bg_proto_memory,
+                args.proto_temperature
+            )
 
-            # loss =loss_dice + loss_ce + consistency_weight * bclloss
-
-            ### visualization
-            visualizer.visualize_prediction(
-                image_sample={"image":net_input_l[0], 'label': l_label[0]},
-                features=out_l_fg[0]
-                )
-            # visualizer.visualiza_patch_in_pic_version1(
-            #     image_sample={"image":net_input_l[0], 'label': l_label[0]},
-            #     features=out_l_fg[0],
-            #     low_confidence_indices=patches_mean_1_top_indices,
-            #     grid_size=topnum,
-            #     pic_name='low_confidence_patches_iter_{}.png'.format(iter_num),
-            # )
-            viz = PatchVisualizer(N=32, n=64)
-            viz.visualize(out_l_fg, torch.concat([net_input_l[0], net_input_l[0], net_input_l[0]], dim=0))
-            
-            sys.exit()
-            # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
-
-            # loss = loss + loss_s
+            proto_loss = args.lambda_proto * fg_proto_loss + args.lambda_neg * bg_neg_loss
+            loss = loss_dice + loss_ce + proto_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -607,7 +797,68 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             iter_num += 1
             update_model_ema(model, ema_model, 0.99)
 
-            
+            writer.add_scalar('info/total_loss', loss, iter_num)
+            writer.add_scalar('info/mix_dice', loss_dice, iter_num)
+            writer.add_scalar('info/mix_ce', loss_ce, iter_num)
+            writer.add_scalar('info/fg_proto_loss', fg_proto_loss, iter_num)
+            writer.add_scalar('info/bg_neg_loss', bg_neg_loss, iter_num)
+
+            logging.info('iteration %d: loss: %f, dice: %f, ce: %f, fg_proto: %f, bg_neg: %f' %
+                         (iter_num, loss, loss_dice, loss_ce, fg_proto_loss, bg_neg_loss))
+
+            if iter_num % 20 == 0:
+                image = net_input_unl[1, 0:1, :, :]
+                writer.add_image('train/Un_Image', image, iter_num)
+                outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
+                writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
+                labs = unl_label[1, ...].unsqueeze(0) * 50
+                writer.add_image('train/Un_GroundTruth', labs, iter_num)
+
+                image_l = net_input_l[1, 0:1, :, :]
+                writer.add_image('train/L_Image', image_l, iter_num)
+                outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
+                writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
+                labs_l = l_label[1, ...].unsqueeze(0) * 50
+                writer.add_image('train/L_GroundTruth', labs_l, iter_num)
+
+            if iter_num > 0 and iter_num % 200 == 0:
+                model.eval()
+                ema_model.eval()
+                metric_list = 0.0
+                ema_metric_list = 0.0
+                for _, sampled_batch in enumerate(valloader):
+                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
+                                                         classes=num_classes)
+                    ema_metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], ema_model,
+                                                         classes=num_classes)
+                    metric_list += np.array(metric_i)
+                    ema_metric_list += np.array(ema_metric_i)
+                metric_list = metric_list / len(db_val)
+                for class_i in range(num_classes - 1):
+                    writer.add_scalar('info/val_{}_dice'.format(class_i + 1), metric_list[class_i, 0], iter_num)
+                    writer.add_scalar('info/val_{}_hd95'.format(class_i + 1), metric_list[class_i, 1], iter_num)
+
+                performance = np.mean(metric_list, axis=0)[0]
+                ema_performance = np.mean(ema_metric_list, axis=0)[0]
+                
+                writer.add_scalar('info/val_mean_dice', performance, iter_num)
+
+                if performance > best_performance:
+                    best_performance = performance
+                    save_mode_path = os.path.join(snapshot_path,
+                                                  'iter_{}_dice_{}.pth'.format(iter_num, round(best_performance, 4)))
+                    save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+                    torch.save(model.state_dict(), save_mode_path)
+                    torch.save(model.state_dict(), save_best_path)
+                if ema_performance > ema_best_performance:
+                    ema_best_performance = ema_performance
+                    ema_save_mode_path = os.path.join(snapshot_path,
+                                                  'iter_ema_{}_dice_{}.pth'.format(iter_num, round(ema_best_performance, 4)))
+                    ema_save_best_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
+                    torch.save(model.state_dict(), ema_save_mode_path)
+                    torch.save(model.state_dict(), ema_save_best_path)
+                logging.info('iteration %d : mean_dice : %f' % (iter_num, performance))
+                logging.info('iteration %d : mean_dice : %f' % (iter_num, ema_performance))
                 
 
             if iter_num >= max_iterations:
@@ -616,222 +867,6 @@ def self_train_visual(args, pre_snapshot_path, snapshot_path):
             iterator.close()
             break
     writer.close()
-
-import numpy as np
-import torch
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-
-class PatchVisualizer:
-    def __init__(self, N: int, n: int):
-        """
-        PatchVisualizer 类：可视化模型输出中置信度最低的 patch
-
-        参数:
-            N: int
-               将图像划分为 N×N 个 patch
-            n: int
-               选择置信度最低的 n 个 patch 进行高亮标注
-        """
-        self.N = N
-        self.n = n
-
-    def _compute_pseudo_and_conf(self, output: torch.Tensor, b_idx: int = 0):
-        """
-        从模型输出计算伪标签图和置信度图
-
-        输入参数:
-            output: torch.Tensor, 形状 (B, C, H, W)
-                - B: batch size
-                - C: 类别数
-                - H: 图像高度
-                - W: 图像宽度
-            b_idx: int
-                - 要处理的 batch 索引 (默认 0)
-
-        返回:
-            pseudo_label: torch.LongTensor, 形状 (H, W)
-                - 每个像素的预测类别索引
-            conf_map: torch.FloatTensor, 形状 (H, W)
-                - 每个像素的预测置信度（属于预测类别的最大概率）
-        """
-        probs = F.softmax(output[b_idx:b_idx+1], dim=1)  # (1, C, H, W)
-        conf_map, pseudo_label = probs.max(dim=1)        # (1, H, W)
-        return pseudo_label.squeeze(0), conf_map.squeeze(0)
-
-    def _compute_grid_edges(self, H: int, W: int):
-        """
-        计算网格划分的行列边界
-
-        输入参数:
-            H: int
-               图像高度
-            W: int
-               图像宽度
-
-        返回:
-            row_edges: np.ndarray, 形状 (N+1,)
-                - 行方向的边界坐标 (像素索引)，用于划分 N 行
-            col_edges: np.ndarray, 形状 (N+1,)
-                - 列方向的边界坐标 (像素索引)，用于划分 N 列
-        """
-        row_edges = np.linspace(0, H, self.N + 1, dtype=int)
-        col_edges = np.linspace(0, W, self.N + 1, dtype=int)
-        return row_edges, col_edges
-
-    def _patch_confidence_matrix(self, conf_map: torch.Tensor):
-        """
-        计算每个 patch 的平均置信度
-
-        输入参数:
-            conf_map: torch.FloatTensor, 形状 (H, W)
-                - 每个像素点的最大类别置信度
-
-        返回:
-            conf_mat: torch.FloatTensor, 形状 (N, N)
-                - 每个 patch 的平均置信度
-            row_edges: np.ndarray, 形状 (N+1,)
-                - 行方向的边界索引
-            col_edges: np.ndarray, 形状 (N+1,)
-                - 列方向的边界索引
-        """
-        H, W = conf_map.shape
-        row_edges, col_edges = self._compute_grid_edges(H, W)
-
-        conf_mat = torch.empty((self.N, self.N), dtype=conf_map.dtype)
-        for r in range(self.N):
-            rs, re = row_edges[r], row_edges[r+1]
-            for c in range(self.N):
-                cs, ce = col_edges[c], col_edges[c+1]
-                conf_mat[r, c] = conf_map[rs:re, cs:ce].mean()
-        return conf_mat, row_edges, col_edges
-
-    def _lowest_confidence_patches(self, conf_mat: torch.Tensor):
-        """
-        选出置信度最低的 n 个 patch
-
-        输入参数:
-            conf_mat: torch.FloatTensor, 形状 (N, N)
-                - 每个 patch 的平均置信度
-
-        返回:
-            low_patches: list(dict)
-                - 列表长度 = n
-                - 每个元素是字典，包含:
-                    {
-                        'r': int, patch 的行索引 [0, N-1],
-                        'c': int, patch 的列索引 [0, N-1],
-                        'score': float, 该 patch 的平均置信度
-                    }
-        """
-        flat = conf_mat.flatten()
-        k = min(self.n, flat.numel())
-        vals, idxs = torch.topk(flat, k, largest=False)  # 取负再 topk = 取最小值
-        out = []
-        for idx, v in zip(idxs, vals):
-            r, c = divmod(int(idx), self.N)
-            out.append({'r': r, 'c': c, 'score': float(-v.item())})
-        return out
-
-    def _prepare_image(self, image: torch.Tensor):
-        """
-        处理输入图像，转换为 numpy 格式，数值范围 [0,255] uint8
-
-        输入参数:
-            image: torch.Tensor
-                - 形状可以是 (H, W), (1, H, W), (3, H, W), (H, W, 3)
-                - 数值范围 [0,1] 或 [0,255]
-
-        返回:
-            img_np: np.ndarray, 形状 (H, W) 或 (H, W, 3)
-                - 转换后的 numpy 数组，范围 [0,255]，类型 uint8
-        """
-        if isinstance(image, torch.Tensor):
-            arr = image.detach().cpu()
-        else:
-            arr = torch.as_tensor(image)
-
-        # 如果是 (1, H, W) -> (H, W)
-        if arr.dim() == 3 and arr.shape[0] == 1:
-            arr = arr.squeeze(0)
-
-        # 如果是 (3, H, W) -> (H, W, 3)
-        if arr.dim() == 3 and arr.shape[0] == 3:
-            arr = arr.permute(1, 2, 0)
-
-        # 如果是 (H, W)，直接保留
-        # 如果是 (H, W, 3)，直接保留
-        if arr.dim() not in (2, 3):
-            raise ValueError(f"Unsupported image shape {arr.shape}")
-
-        arr = arr.float()
-        if arr.max() <= 1.0:
-            arr = arr * 255.0
-
-        arr = arr.clamp(0, 255).byte().numpy()
-        return arr
-    def visualize(self, output: torch.Tensor, image: torch.Tensor, b_idx: int = 0, save_path: str=None):
-        """
-        在原图上可视化置信度最低的 n 个 patch
-
-        输入参数:
-            output: torch.Tensor, 形状 (B, C, H, W)
-                - 模型输出 (logits 或者概率)
-            image: torch.Tensor, 形状 (H, W) 或 (3, H, W)
-                - 原始输入图像，取值范围 [0,1] 或 [0,255]
-            b_idx: int
-                - 处理第几个 batch 样本
-
-        输出:
-            None
-            - 使用 Matplotlib 绘制可视化图像
-            - 原图被划分为 N×N 网格
-            - 置信度最低的 n 个 patch 被红框和半透明红色覆盖标注
-            - 框中央标注 patch 平均置信度值
-        """
-        pseudo, conf_map = self._compute_pseudo_and_conf(output, b_idx)
-        conf_mat, row_edges, col_edges = self._patch_confidence_matrix(conf_map)
-        low_patches = self._lowest_confidence_patches(conf_mat)
-
-        img_np = self._prepare_image(image)
-
-        H, W = conf_map.shape
-        fig, ax = plt.subplots(figsize=(8, 8 * H / W))
-        ax.imshow(img_np, origin='upper')
-        ax.set_title(f"Lowest {self.n} patches (N={self.N})")
-        ax.set_axis_off()
-
-        # 画网格线
-        for x in col_edges:
-            ax.axvline(x, color='white', linewidth=0.8)
-        for y in row_edges:
-            ax.axhline(y, color='white', linewidth=0.8)
-
-        # 高亮 patch
-        for p in low_patches:
-            r, c, score = p['r'], p['c'], p['score']
-            x0, x1 = col_edges[c], col_edges[c+1]
-            y0, y1 = row_edges[r], row_edges[r+1]
-            w, h = x1 - x0, y1 - y0
-            rect = Rectangle((x0, y0), w, h,
-                             linewidth=2, edgecolor='red',
-                             facecolor='red', alpha=0.3)
-            ax.add_patch(rect)
-            ax.text(x0+w/2, y0+h/2, f"{score:.3f}",
-                    color='white', ha='center', va='center', fontsize=8,
-                    bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.6))
-
-        ax.set_xlim(0, W)
-        ax.set_ylim(H, 0)
-        plt.tight_layout()
-        
-        # 自动保存
-        if save_path is None:
-            os.makedirs("images", exist_ok=True)
-            save_path = os.path.join("images", "lowest_conf_patches.png")
-        plt.savefig(save_path, dpi=150)
-        print(f"✅ 保存结果到: {save_path}")
 
 
 if __name__ == "__main__":
@@ -846,21 +881,21 @@ if __name__ == "__main__":
     # -- path to save models
     pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
     self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
-    # for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
-    #     if not os.path.exists(snapshot_path):
-    #         os.makedirs(snapshot_path)
-    # shutil.copy('./just_try/ACDC/ACDC_train_4_2_visual.py', self_snapshot_path)
+    for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
+        if not os.path.exists(snapshot_path):
+            os.makedirs(snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_9_1.py', self_snapshot_path)
 
-    # # Pre_train
-    # logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
-    #                     format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
-    # logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
-    # logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    # Pre_train
+    logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
+                        format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    logging.info(str(args))
+    pre_train(args, pre_snapshot_path)
 
     # Self_train
-    # logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
-    #                     format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
-    # logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
-    # logging.info(str(args))
-    self_train_visual(args, pre_snapshot_path, self_snapshot_path)
+    logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
+                        format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    logging.info(str(args))
+    self_train(args, pre_snapshot_path, self_snapshot_path)

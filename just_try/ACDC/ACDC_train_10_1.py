@@ -21,25 +21,24 @@ from skimage.measure import label
 from einops import rearrange
 
 from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
-from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
 from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
-from networks.CVBM import CVBM, CVBM_Argument
+from networks.unet_scfr import CVBM2d_SCFRArgument
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
-parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
-parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
+parser.add_argument('--exp', type=str, default='CVBM2d_ACDC_SCFR', help='experiment_name')
+parser.add_argument('--model', type=str, default='CVBM2d_SCFRArgument', help='model_name')
 parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
 parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
-parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
+parser.add_argument('--batch_size', type=int, default=12, help='batch_size per gpu')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
 parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
 # label and unlabel
-parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=6, help='labeled_batch_size per gpu')
 parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 # costs
@@ -48,7 +47,9 @@ parser.add_argument('--consistency', type=float, default=0.1, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
 parser.add_argument('--s_param', type=int, default=6, help='multinum of random masks')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_3/1', help='snapshot_path')
+parser.add_argument('--rectify_weight', type=float, default=0.1, help='weight for rectification consistency loss')
+parser.add_argument('--rectify_conf', type=float, default=0.95, help='confidence threshold for rectified BG guidance')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_10_1/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
@@ -63,6 +64,9 @@ dynamic_threshold_fg = [1/num_classes for i in range(4)]
 dynamic_threshold_class = [1/num_classes for i in range(args.num_classes)]
 plt_bg, plt_fg = {}, {}
 
+
+def build_scfr_model(in_chns: int, class_num: int):
+    return CVBM2d_SCFRArgument(in_chns=in_chns, class_num=class_num).cuda()
 
 
 def load_net(net, path):
@@ -157,10 +161,10 @@ def get_ACDC_masks(output, nms=0,onehot=False):
             probs = get_ACDC_2DLargestCC(indices)
     return probs
 
-
 def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
     probs = F.softmax(output, dim=1)
     probs, indices = torch.max(probs, dim=1)
+    confidence_foreground_selection(probs, indices, threshold=0.5)
     if nms == 1:
         if onehot:
             indices = get_ACDC_2DLargestCC_onehot(indices)
@@ -168,12 +172,63 @@ def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
             indices = get_ACDC_2DLargestCC(indices)
     return indices
 
+def confidence_foreground_selection(segmentation, indices, threshold): 
+    """
+    基于置信度的前景模块选择
+    
+    Args:
+
+        threshold: list - 置信度阈值
+    
+    Returns:
+        torch.Tensor, shape (B, H, W) - 过滤后的类别标签（低置信度区域设为0背景）
+    """
+    # 创建置信度掩码：只有高于阈值的像素被认为是前景
+    confidence_mask = segmentation > threshold
+    
+    # 应用置信度掩码：低置信度区域设为背景标签0
+    filtered_indices = indices * confidence_mask
+    
+    return filtered_indices
+
+
+def generate_pseudo_labels_with_confidence(predictions, class_thresholds):
+    """
+    根据类别阈值生成伪标签
+    
+    Args:
+            模型的预测输出（softmax 概率或者 sigmoid 后的置信度）。
+        class_thresholds: list or torch.Tensor, shape (C,)
+            每个类别对应的阈值。
+    
+    Returns:
+        torch.Tensor, shape (B, H, W, D)
+            伪标签（低于对应类别阈值的像素设为0）
+    """
+    B, C, H, W = predictions.shape
+    if not torch.is_tensor(class_thresholds):
+        class_thresholds = torch.tensor(class_thresholds, device=predictions.device, dtype=predictions.dtype)
+
+    # (B, H, W) 取每个像素的最大概率类别
+    probs, pred_classes = torch.max(predictions, dim=1)  # probs: (B,H,W), pred_classes: (B,H,W)
+
+    # 获取每个像素对应的类别阈值
+    thresholds = class_thresholds[pred_classes]  # (B,H,W)
+
+    # 判断是否超过类别阈值
+    mask = probs > thresholds  # (B,H,W)
+
+    # 应用阈值过滤，低置信度设为背景（0）
+    pseudo_labels = pred_classes * mask
+
+    return pseudo_labels
+
 
 def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return 5 * args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
-
+# @torch.no_grad()
 def update_model_ema(model, ema_model, alpha):
     model_state = model.state_dict()
     model_ema_state = ema_model.state_dict()
@@ -316,6 +371,18 @@ def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose
     return pos_patches, neg_patches
 
 
+def rectification_consistency_loss(fg_logits, bg_logits, confidence=0.95):
+    fg_prob = F.softmax(fg_logits, dim=1)
+    bg_prob = F.softmax(bg_logits, dim=1)
+    max_probs, _ = torch.max(fg_prob, dim=1, keepdim=True)
+    mask = (max_probs > confidence).float()
+    if mask.sum() < 1:
+        return torch.tensor(0.0, device=fg_logits.device)
+    diff = (bg_prob - fg_prob.detach()) * mask
+    loss = torch.sum(diff ** 2) / (mask.sum() * fg_prob.shape[1])
+    return loss
+
+
 def pre_train(args, snapshot_path):
     base_lr = args.base_lr
     num_classes = args.num_classes
@@ -324,8 +391,7 @@ def pre_train(args, snapshot_path):
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
         
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train_4_1")
-    # model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
+    model = build_scfr_model(in_chns=1, class_num=num_classes)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -447,8 +513,8 @@ def self_train(args, pre_snapshot_path, snapshot_path):
     pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
     labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
 
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
-    ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
+    model = build_scfr_model(in_chns=1, class_num=num_classes)
+    ema_model = build_scfr_model(in_chns=1, class_num=num_classes)
     for param in ema_model.parameters():
         param.detach_()  # ema_model set
 
@@ -561,6 +627,9 @@ def self_train(args, pre_snapshot_path, snapshot_path):
 
             # conv 3x3 connect
             output_mix = torch.cat([out_unl, out_l], dim=0)
+            # conv2d = nn.Conv2d(args.num_classes*2, args.num_classes, 1, padding=0)
+            # conv2d = conv2d.cuda()
+            # output_mix = conv2d(output_mix)
 
             unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
             l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
@@ -573,12 +642,10 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
 
             pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=64, patch_size=(8, 8))
-            # 现在形状满足你的要求：
-            #   pos_patches: [B, 16, C] 作为正样本（低置信度）
-            #   neg_patches: [B, L-16, C] 作为负样本
             bclloss = BCLLoss(pos_patches, neg_patches)
+            loss_rect_consist = rectification_consistency_loss(out_unl_fg, out_unl_bg, confidence=args.rectify_conf)
 
-            loss = loss_dice + loss_ce + consistency_weight * bclloss
+            loss = loss_dice + loss_ce + consistency_weight * bclloss + args.rectify_weight * loss_rect_consist
             # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             optimizer.zero_grad()
@@ -592,6 +659,7 @@ def self_train(args, pre_snapshot_path, snapshot_path):
             writer.add_scalar('info/mix_dice', loss_dice, iter_num)
             writer.add_scalar('info/mix_ce', loss_ce, iter_num)
             writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
+            writer.add_scalar('info/rect_consistency', loss_rect_consist, iter_num)
 
             logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
 
@@ -673,7 +741,7 @@ if __name__ == "__main__":
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-    shutil.copy('./just_try/ACDC/ACDC_train_4_6_3.py', self_snapshot_path)
+    shutil.copy('./just_try/ACDC/ACDC_train_10_1.py', self_snapshot_path)
 
     # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,

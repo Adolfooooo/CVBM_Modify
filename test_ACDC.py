@@ -137,6 +137,9 @@ def Inference(args):
     os.makedirs(test_save_path)
     net = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes)
     ema_net = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes)
+    # from networks.unet_scfr import CVBM2d_SCFRArgument
+    # net = CVBM2d_SCFRArgument(in_chns=1, class_num=4).cuda()
+    # ema_net = CVBM2d_SCFRArgument(in_chns=1, class_num=4).cuda()
     save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
     ema_model_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
     net.load_state_dict(torch.load(save_model_path))

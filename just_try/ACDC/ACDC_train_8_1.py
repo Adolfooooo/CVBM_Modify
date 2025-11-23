@@ -585,7 +585,7 @@ def boundary_kl_loss(fg_logits, bg_logits, band_mask):
     bg_logprob = F.log_softmax(bg_logits, dim=1)
     kl_map = F.kl_div(bg_logprob, fg_prob, reduction='none').sum(dim=1, keepdim=True)
     weighted = kl_map * band_mask
-    return weighted.sum() / (band_mask.sum() + eps)
+    return weighted.sum() / (band_mask.sum() + eps) 
 
 
 def pre_train(args, snapshot_path):
