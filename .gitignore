@@ -4,7 +4,6 @@
 **.pyc
 **.pth
 **copytest**
-__init__.py
 record_train.txt
 run_ACDC.sh
 run_LA.sh
