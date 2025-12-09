@@ -379,8 +379,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     BCLLoss = losses.BlockContrastiveLoss()
 
     pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
-    # load_net(model, pretrained_model)
-    # load_net(ema_model, pretrained_model)
+    load_net(model, pretrained_model)
+    load_net(ema_model, pretrained_model)
 
     class_ratio = compute_class_ratio(db_train, num_cls=num_classes, num_sample=4)
 
@@ -602,7 +602,7 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    # pre_train(args, pre_snapshot_path)
+    pre_train(args, pre_snapshot_path)
     # -- Self-training
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
