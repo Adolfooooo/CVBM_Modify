@@ -1,78 +1,77 @@
-import sys
-import os
 import argparse
 import logging
-import shutil
-import random
 
+import os
+import random
+import shutil
+import sys
+
+import numpy as np
 import torch
-import torch.optim as optim
-from torchvision import transforms
-import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
-from torch.utils.data import DataLoader
-
-from tqdm import tqdm
+import torch.nn.functional as F
+import torch.optim as optim
 from tensorboardX import SummaryWriter
+from torch.utils.data import DataLoader
+from torch.nn.modules.loss import CrossEntropyLoss
+from torchvision import transforms
+from tqdm import tqdm
 from skimage.measure import label
-import numpy as np
+from einops import rearrange
 
-from utils import losses, ramps, val_2d
-from dataloaders.dataset import BaseDataSets, RandomGenerator, TwoStreamBatchSampler, WeakStrongAugment
+from dataloaders.dataset import (BaseDataSets, RandomGenerator, TwoStreamBatchSampler, CreateOnehotLabel, WeakStrongAugment)
 from networks.net_factory import net_factory
-from utils.BCP_utils import mix_loss, update_ema_variables
-from .skc2d_module import CVBMArgumentWithSKC2D
+from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
+from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
+from networks.CVBM import CVBM, CVBM_Argument
+from .module.skc2d_module import CVBMArgumentWithSKC2D
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='exp_name')
+parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
+parser.add_argument('--exp', type=str, default='CVBM2d_ACDC', help='experiment_name')
 parser.add_argument('--model', type=str, default='CVBM2d_Argument', help='model_name')
-parser.add_argument('--pre_max_iteration', type=int, default=10000, help='maximum pre-train iteration to train')
-parser.add_argument('--self_max_iteration', type=int, default=30000, help='maximum self-train iteration to train')
-parser.add_argument('--max_samples', type=int, default=1400, help='maximum slices to train')
-parser.add_argument('--labeled_bs', type=int, default=12, help='batch_size of labeled data per gpu')
+parser.add_argument('--pre_iterations', type=int, default=10000, help='maximum epoch number to train')
+parser.add_argument('--max_iterations', type=int, default=30000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=24, help='batch_size per gpu')
-parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch_size of loading image')
-parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
-parser.add_argument('--labelnum', type=int, default=3, help='trained samples')
-parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
+parser.add_argument('--base_lr', type=float, default=0.01, help='segmentation network learning rate')
+parser.add_argument('--patch_size', type=list, default=[256, 256], help='patch size of network input')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_classes', type=int, default=4, help='output channel of network')
-parser.add_argument('--num_workers', type=int, default=8, help='cpu core num_workers')
-parser.add_argument('--consistency', type=float, default=0.1, help='consistency')
-parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
-parser.add_argument('--magnitude', type=float, default='6.0', help='magnitude')
+# label and unlabel
+parser.add_argument('--labeled_bs', type=int, default=12, help='labeled_batch_size per gpu')
+parser.add_argument('--labelnum', type=int, default=3, help='labeled data')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
-parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of mask/image')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_ACDC_11_1/1/', help='snapshot path to save model')
+# costs
+parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
+parser.add_argument('--consistency', type=float, default=0.1, help='consistency')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_3/1', help='snapshot_path')
+
 args = parser.parse_args()
-torch.backends.cudnn.benchmark = True
+pre_max_iterations = args.pre_iterations
+self_max_iterations = args.max_iterations
+dice_loss = losses.DiceLoss(n_classes=4)
+onehot_dice_loss = losses.DiceLoss2d(n_classes=4)
+onehot_ce_loss=losses.CrossEntropyLoss(n_classes=4)
+alpha = 0.99
+num_classes = args.num_classes
+dynamic_threshold_bg = [1/num_classes for i in range(4)]
+dynamic_threshold_fg = [1/num_classes for i in range(4)]
+dynamic_threshold_class = [1/num_classes for i in range(args.num_classes)]
+plt_bg, plt_fg = {}, {}
 
 
-def get_cut_mask(out, thres=0.5, nms=0):
-    probs = F.softmax(out, 1)
-    masks = (probs >= thres).type(torch.int64)
-    masks = masks[:, 1, :, :].contiguous()
-    if nms == 1:
-        masks = LargestCC(masks)
-    return masks
+
+def load_net(net, path):
+    state = torch.load(str(path))
+    net.load_state_dict(state['net'])
 
 
-def LargestCC(segmentation):
-    N = segmentation.shape[0]
-    batch_list = []
-    for n in range(N):
-        n_prob = segmentation[n].detach().cpu().numpy()
-        labels = label(n_prob)
-        if labels.max() != 0:
-            largestCC = labels == np.argmax(np.bincount(labels.flat)[1:]) + 1
-        else:
-            largestCC = n_prob
-        batch_list.append(largestCC)
-
-    return torch.Tensor(batch_list).cuda()
+def load_net_opt(net, optimizer, path):
+    state = torch.load(str(path))
+    net.load_state_dict(state['net'])
+    optimizer.load_state_dict(state['opt'])
 
 
 def save_net_opt(net, optimizer, path):
@@ -83,218 +82,376 @@ def save_net_opt(net, optimizer, path):
     torch.save(state, str(path))
 
 
-def load_net_opt(net, optimizer, path):
-    state = torch.load(str(path))
-    net.load_state_dict(state['net'])
-    optimizer.load_state_dict(state['opt'])
+def get_ACDC_LargestCC(segmentation):
+    class_list = []
+    for i in range(1, 4):
+        temp_prob = segmentation == i * torch.ones_like(segmentation)
+        temp_prob = temp_prob.detach().cpu().numpy()
+        labels = label(temp_prob)
+        # -- with 'try'
+        assert (labels.max() != 0)  # assume at least 1 CC
+        largestCC = labels == np.argmax(np.bincount(labels.flat)[1:]) + 1
+        class_list.append(largestCC * i)
+    acdc_largestCC = class_list[0] + class_list[1] + class_list[2]
+    return torch.from_numpy(acdc_largestCC).cuda()
 
 
-def load_net(net, path):
-    state = torch.load(str(path))
-    net.load_state_dict(state['net'])
+def get_ACDC_2DLargestCC(segmentation):
+    batch_list = []
+    N = segmentation.shape[0]
+    for i in range(0, N):
+        class_list = []
+        for c in range(1, 4):
+            temp_seg = segmentation[i]  # == c *  torch.ones_like(segmentation[i])
+            temp_prob = torch.zeros_like(temp_seg)
+            temp_prob[temp_seg == c] = 1
+            temp_prob = temp_prob.detach().cpu().numpy()
+            labels = label(temp_prob)
+            if labels.max() != 0:
+                largestCC = labels == np.argmax(np.bincount(labels.flat)[1:]) + 1
+                class_list.append(largestCC * c)
+            else:
+                class_list.append(temp_prob)
+
+        n_batch = class_list[0] + class_list[1] + class_list[2]
+        batch_list.append(n_batch)
+
+    return torch.Tensor(batch_list).cuda()
 
 
-def load_pretrained_backbone(model, ckpt_path):
-    state = torch.load(str(ckpt_path))
-    state_dict = state['net'] if 'net' in state else state
-    model_dict = model.state_dict()
-    compatible = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
-    model_dict.update(compatible)
-    model.load_state_dict(model_dict)
-    logging.info("Loaded %d/%d tensors from %s into %s",
-                 len(compatible), len(model_dict), ckpt_path, model.__class__.__name__)
+def get_ACDC_2DLargestCC_onehot(segmentation):
+    '''
+    inputs: segementation: BxHxW, indices
+    '''
+    batch_list = []
+    batch_num = segmentation.shape[0]
+    for i in range(0, batch_num):
+        class_list = []
+        for c in range(0, 4):
+            temp_seg = segmentation[i]  # == c *  torch.ones_like(segmentation[i])
+            temp_prob = torch.zeros_like(temp_seg)
+            temp_prob[temp_seg == c] = 1
+            temp_prob = temp_prob.detach().cpu().numpy()
+            labels = label(temp_prob)
+            if labels.max() != 0:
+                largestCC = labels == np.argmax(np.bincount(labels.flat)[1:]) + 1
+                class_list.append(largestCC * c)
+            else:
+                class_list.append(temp_prob)
+
+        batch_list.append(class_list)
+
+    return torch.Tensor(batch_list).cuda()
+
+
+def get_ACDC_masks(output, nms=0,onehot=False):
+    probs = F.softmax(output, dim=1)
+    probs, indices = torch.max(probs, dim=1)
+
+    if nms == 1:
+        if onehot:
+            probs = get_ACDC_2DLargestCC_onehot(indices)
+        else:
+            probs = get_ACDC_2DLargestCC(indices)
+    return probs
+
+
+def get_ACDC_masks_with_confidence(output, nms=0,onehot=False):
+    probs = F.softmax(output, dim=1)
+    probs, indices = torch.max(probs, dim=1)
+    if nms == 1:
+        if onehot:
+            indices = get_ACDC_2DLargestCC_onehot(indices)
+        else:
+            indices = get_ACDC_2DLargestCC(indices)
+    return indices
 
 
 def get_current_consistency_weight(epoch):
-    return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
+    # Consistency ramp-up from https://arxiv.org/abs/1610.02242
+    return 5 * args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
 
-def select_patches_for_contrast_2d(output_mix, topnum=16, patch_size=(8, 8), choose_largest=False):
-    B, C, H, W = output_mix.shape
-    ph, pw = patch_size
-    assert H % ph == 0 and W % pw == 0, "H/W must be divisible by patch_size"
-    probs = F.softmax(output_mix, dim=1)
-    score = probs.max(dim=1, keepdim=True).values
-    patch_conf = F.avg_pool2d(score, kernel_size=(ph, pw), stride=(ph, pw)).flatten(1)
-    _, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)
-
-    B_, L = patch_conf.shape
-    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)
-    mask = torch.ones_like(all_idx, dtype=torch.bool)
-    mask.scatter_(1, top_idx, False)
-    num_neg = L - topnum
-
-    feat_patches = F.avg_pool2d(probs, kernel_size=(ph, pw), stride=(ph, pw))
-    feat_patches = feat_patches.flatten(2).permute(0, 2, 1).contiguous()
-
-    pos_patches = torch.gather(feat_patches, dim=1, index=top_idx.unsqueeze(-1).expand(-1, -1, C))
-    neg_patches = feat_patches[mask].view(B, num_neg, C)
-    return pos_patches, neg_patches
+def update_model_ema(model, ema_model, alpha):
+    model_state = model.state_dict()
+    model_ema_state = ema_model.state_dict()
+    new_dict = {}
+    for key in model_state:
+        new_dict[key] = alpha * model_ema_state[key] + (1 - alpha) * model_state[key]
+    ema_model.load_state_dict(new_dict)
 
 
-def context_mask_2d(img, mask_ratio):
-    batch_size, channel, img_x, img_y = img.shape
+def generate_mask(img, number_class):
+    batch_size, channel, img_x, img_y = img.shape[0], img.shape[1], img.shape[2], img.shape[3]
     loss_mask = torch.ones(batch_size, img_x, img_y).cuda()
     mask = torch.ones(img_x, img_y).cuda()
-    patch_pixel_x, patch_pixel_y = int(img_x * mask_ratio), int(img_y * mask_ratio)
-    w = np.random.randint(0, img_x - patch_pixel_x)
-    h = np.random.randint(0, img_y - patch_pixel_y)
-    mask[w:w + patch_pixel_x, h:h + patch_pixel_y] = 0
-    loss_mask[:, w:w + patch_pixel_x, h:h + patch_pixel_y] = 0
+    onehot_mask = torch.ones(batch_size, number_class, img_x, img_y).cuda()
+    patch_x, patch_y = int(img_x * 2 / 3), int(img_y * 2 / 3)
+    w = np.random.randint(0, img_x - patch_x)
+    h = np.random.randint(0, img_y - patch_y)
+    mask[w:w + patch_x, h:h + patch_y] = 0
+    loss_mask[:, w:w + patch_x, h:h + patch_y] = 0
+    onehot_mask[:, :, w:w + patch_x, h:h + patch_y] = 0
+    return mask.long(), loss_mask.long(), onehot_mask.long()
+
+
+def random_mask(img, shrink_param=3):
+    batch_size, channel, img_x, img_y = img.shape[0], img.shape[1], img.shape[2], img.shape[3]
+    loss_mask = torch.ones(batch_size, img_x, img_y).cuda()
+    x_split, y_split = int(img_x / shrink_param), int(img_y / shrink_param)
+    patch_x, patch_y = int(img_x * 2 / (3 * shrink_param)), int(img_y * 2 / (3 * shrink_param))
+    mask = torch.ones(img_x, img_y).cuda()
+    for x_s in range(shrink_param):
+        for y_s in range(shrink_param):
+            w = np.random.randint(x_s * x_split, (x_s + 1) * x_split - patch_x)
+            h = np.random.randint(y_s * y_split, (y_s + 1) * y_split - patch_y)
+            mask[w:w + patch_x, h:h + patch_y] = 0
+            loss_mask[:, w:w + patch_x, h:h + patch_y] = 0
     return mask.long(), loss_mask.long()
 
 
+def contact_mask(img):
+    batch_size, channel, img_x, img_y = img.shape[0], img.shape[1], img.shape[2], img.shape[3]
+    loss_mask = torch.ones(batch_size, img_x, img_y).cuda()
+    mask = torch.ones(img_x, img_y).cuda()
+    patch_y = int(img_y * 4 / 9)
+    h = np.random.randint(0, img_y - patch_y)
+    mask[h:h + patch_y, :] = 0
+    loss_mask[:, h:h + patch_y, :] = 0
+    return mask.long(), loss_mask.long()
+
+
+def mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
+    CE = nn.CrossEntropyLoss(reduction='none')
+    img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
+    output_soft = F.softmax(output, dim=1)
+    image_weight, patch_weight = l_weight, u_weight
+    if unlab:
+        image_weight, patch_weight = u_weight, l_weight
+    patch_mask = 1 - mask
+    loss_dice = dice_loss(output_soft, img_l.unsqueeze(1), mask.unsqueeze(1)) * image_weight
+    loss_dice += dice_loss(output_soft, patch_l.unsqueeze(1), patch_mask.unsqueeze(1)) * patch_weight
+    loss_ce = image_weight * (CE(output, img_l) * mask).sum() / (mask.sum() + 1e-16)
+    loss_ce += patch_weight * (CE(output, patch_l) * patch_mask).sum() / (patch_mask.sum() + 1e-16)  # loss = loss_ce
+    return loss_dice, loss_ce
+
+
+def onehot_mix_loss(output, img_l, patch_l, mask, l_weight=1.0, u_weight=0.5, unlab=False):
+    # CE = CrossEntropyLoss
+    img_l, patch_l = img_l.type(torch.int64), patch_l.type(torch.int64)
+    output_soft = F.softmax(output, dim=1)
+    image_weight, patch_weight = l_weight, u_weight
+    if unlab:
+        image_weight, patch_weight = u_weight, l_weight
+    patch_mask = 1 - mask
+    loss_dice = onehot_dice_loss(output_soft, img_l, mask) * image_weight
+    loss_dice += onehot_dice_loss(output_soft, patch_l, patch_mask) * patch_weight
+    loss_ce = onehot_ce_loss(output_soft, img_l, mask) * image_weight
+    loss_ce += onehot_ce_loss(output_soft, patch_l, patch_mask) * patch_weight  # loss = loss_ce
+
+    return loss_dice, loss_ce
+
+### provide for label data to get sclice num
 def patients_to_slices(dataset, patiens_num):
     ref_dict = None
     if "ACDC" in dataset:
         ref_dict = {"1": 32, "3": 68, "7": 136,
                     "14": 256, "21": 396, "28": 512, "35": 664, "70": 1312}
-    elif "Prostate" in dataset:
+    elif "Prostate":
         ref_dict = {"2": 27, "4": 53, "8": 120,
                     "12": 179, "16": 256, "21": 312, "42": 623}
     else:
-        raise ValueError("Unsupported dataset for patients_to_slices mapping")
-    key = str(patiens_num)
-    if key not in ref_dict:
-        raise ValueError(f"patiens_num={patiens_num} not in ref_dict")
-    return ref_dict[key]
+        print("Error")
+    return ref_dict[str(patiens_num)]
 
 
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-pre_max_iterations = args.pre_max_iteration
-self_max_iterations = args.self_max_iteration
-base_lr = args.base_lr
-CE = nn.CrossEntropyLoss(reduction='none')
+def select_patches_for_contrast(output_mix, topnum=16, patch_size=(4, 4), choose_largest=False):
+    """
+    output_mix: [B, C, H, W]（模型预测输出，示例中用 softmax 概率作为对比特征）
+    返回:
+      pos_patches: [B, topnum, C]
+      neg_patches: [B, L-topnum, C]
+    """
+    B, C, H, W = output_mix.shape
+    ph, pw = patch_size
+    assert H % ph == 0 and W % pw == 0, "H/W 必须能被 patch_size 整除（不重叠 patch）"
 
-if args.deterministic:
-    cudnn.benchmark = False
-    cudnn.deterministic = True
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    random.seed(args.seed)
-    np.random.seed(args.seed)
+    # 1) 概率 & 置信度图
+    probs = F.softmax(output_mix, dim=1)          # [B, C, H, W]
+    score = probs.max(dim=1, keepdim=True).values # [B, 1, H, W]
 
+    # 2) 用 unfold 把置信度图切 patch，并做均值 -> 每个 patch 的置信度
+    # unfold 输出 [B, patch_area, L]，L 为 patch 个数
+    score_patches = F.unfold(score, kernel_size=(ph, pw), stride=(ph, pw))  # [B, ph*pw, L]
+    patch_conf = score_patches.mean(dim=1)                                   # [B, L]
 
-def val_all_case_ACDC(model, classes, patch_size, dataset_path):
-    with open(dataset_path + '/val.list', 'r') as f:
-        sample_list = f.readlines()
-    sample_list = [item.replace('\n', '') for item in sample_list]
-    total_metric = []
-    for case in sample_list:
-        h5_path = dataset_path + f"/data/{case}.h5"
-        import h5py
-        with h5py.File(h5_path, 'r') as h5f:
-            image, label = h5f['image'][:], h5f['label'][:]
-        # image shape [D,H,W]
-        metric_case = val_2d.test_single_volume(torch.from_numpy(image).unsqueeze(0),
-                                                torch.from_numpy(label).unsqueeze(0),
-                                                model, classes, patch_size=patch_size)
-        metric_case = np.array(metric_case)  # list of tuples
-        total_metric.append(metric_case)
-    total_metric = np.array(total_metric)
-    avg_metric = total_metric.mean(axis=0)
-    dice_mean = avg_metric[:, 0].mean()
-    return dice_mean
+    # 3) 选取最低置信度的 topnum 作为正样本，其余为负样本
+    top_vals, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)        # [B, topnum]
+    B_, L = patch_conf.shape
+    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)  # [B, L]
+    mask = torch.ones_like(all_idx, dtype=torch.bool)                         # [B, L]
+    mask.scatter_(1, top_idx, False)                                          # 正样本位置设为 False
+    # 剩余的就是负样本
+    num_neg = L - topnum
+
+    # 4) 切特征图并对齐到 [B, L, C]（每个 patch 一个向量，features_dim=C）
+    # 对概率图做 unfold: [B, C*ph*pw, L] -> [B, C, ph*pw, L] -> 在 patch 内做均值 -> [B, C, L] -> [B, L, C]
+    feat_patches = F.unfold(probs, kernel_size=(ph, pw), stride=(ph, pw))     # [B, C*ph*pw, L]
+    feat_patches = feat_patches.view(B, C, ph*pw, L).mean(dim=2)              # [B, C, L]
+    feat_patches = feat_patches.permute(0, 2, 1).contiguous()                 # [B, L, C]
+
+    # 5) 基于索引/掩码取出正负 patch，得到 [B, patchnum, features_dim]
+    # 正样本（最低置信度的 topnum 个）
+    pos_patches = torch.gather(
+        feat_patches, dim=1,
+        index=top_idx.unsqueeze(-1).expand(-1, -1, C)                         # [B, topnum, C]
+    )                                                                          # -> [B, topnum, C]
+
+    # 负样本（其余 patch）
+    # 用布尔掩码批量选择，再 reshape 回 [B, L-topnum, C]
+    neg_patches = feat_patches[mask].view(B, num_neg, C)                      # [B, L-topnum, C]
+
+    return pos_patches, neg_patches
 
 
 def pre_train(args, snapshot_path):
-    model = net_factory(net_type=args.model, in_chns=1, class_num=args.num_classes, mode="train")
-    db_train = BaseDataSets(base_dir=args.root_path,
-                            split='train',
-                            transform=transforms.Compose([
-                                RandomGenerator(output_size=args.patch_size)
-                            ]))
-    total_slices = len(db_train)
-    labeled_slice = min(patients_to_slices(args.root_path, args.labelnum), total_slices)
-    logging.info("Total slices: %d, labeled slices: %d", total_slices, labeled_slice)
-    labeled_idxs = list(range(labeled_slice))
-    unlabeled_idxs = list(range(labeled_slice, total_slices))
-    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
-                                          args.batch_size - args.labeled_bs)
-    sub_bs = int(args.labeled_bs / 2)
+    base_lr = args.base_lr
+    num_classes = args.num_classes
+    max_iterations = args.max_iterations
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
+    labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
+        
+    # model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train_4_1")
+    model = CVBMArgumentWithSKC2D(
+        n_channels=1,
+        n_classes=args.num_classes,
+        has_dropout=True,
+    ).cuda()
+    # model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    trainloader = DataLoader(
-        db_train,
-        batch_sampler=batch_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        worker_init_fn=worker_init_fn,
-        pin_memory_device="cuda",
-        persistent_workers=True,
-    )
+    db_train = BaseDataSets(base_dir=args.root_path,
+                            split="train",
+                            num=None,
+                            transform=transforms.Compose([
+                                WeakStrongAugment(args.patch_size),
+                                CreateOnehotLabel(args.num_classes)
+                            ]))
+    db_val = BaseDataSets(base_dir=args.root_path, split="val")
+    total_slices = len(db_train)
+    labeled_slice = patients_to_slices(args.root_path, args.labelnum)
+    print("Total slices is: {}, labeled slices is:{}".format(total_slices, labeled_slice))
+    labeled_idxs = list(range(0, labeled_slice))
+    unlabeled_idxs = list(range(labeled_slice, total_slices))
+    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
+                                          args.batch_size - args.labeled_bs)
+
+    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
+                             worker_init_fn=worker_init_fn)
+
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
+
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    DICE = losses.mask_DiceLoss(nclass=args.num_classes)
 
     writer = SummaryWriter(snapshot_path + '/log')
-    logging.info("%d itertations per epoch", len(trainloader))
+    logging.info("Start pre_training")
+    logging.info("{} iterations per epoch".format(len(trainloader)))
+
+    model.train()
+
     iter_num = 0
-    best_dice = 0
     max_epoch = pre_max_iterations // len(trainloader) + 1
+    best_performance = 0.0
+    best_hd = 100
     iterator = tqdm(range(max_epoch), ncols=70)
-    for epoch_num in iterator:
+    for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
-            model.train()
-            volume_batch, label_batch = sampled_batch['image'][:args.labeled_bs], sampled_batch['label'][:args.labeled_bs]
-            volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
-            img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:]
-            lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:]
-            with torch.no_grad():
-                img_mask, loss_mask = context_mask_2d(img_a, args.mask_ratio)
+            volume_batch, label_batch, onehot_label_batch = sampled_batch['image'], sampled_batch['label'], \
+                                                            sampled_batch['onehot_label']
+            volume_batch, label_batch, onehot_label_batch = volume_batch.cuda(), label_batch.cuda(), onehot_label_batch.cuda()
 
-            volume_batch = img_a * img_mask + img_b * (1 - img_mask)
-            label_batch = lab_a * img_mask + lab_b * (1 - img_mask)
+            img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
+            lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
+            onehot_lab_a, onehot_lab_b = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
+                                                                                   labeled_sub_bs:args.labeled_bs] == 0
+            img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
+            gt_mixl = lab_a * img_mask + lab_b * (1 - img_mask)
+            onehot_gt_mixl = onehot_lab_a * img_mask + onehot_lab_b * (1 - img_mask)
+            # -- original
+            net_input = img_a * img_mask + img_b * (1 - img_mask)
+            out_mixl_fg,out_mixl, outputs_mixl_bg, *_ = model(net_input, net_input)
+            loss_dice, loss_ce = mix_loss(out_mixl_fg, lab_a, lab_b, loss_mask, u_weight=1.0, unlab=True)
+            loss_dice_bg, loss_ce_bg = onehot_mix_loss(outputs_mixl_bg, onehot_lab_a, onehot_lab_b, onehot_mask, u_weight=1.0,
+                                                       unlab=True)
+            loss = (loss_dice + loss_dice_bg + loss_ce + loss_ce_bg) / 2
 
-            outputs_fg, outputs, outputs_bg, _, _ = model(volume_batch, volume_batch)
-            loss_seg = 0
-            loss_seg_dice = 0
-
-            y2 = outputs_fg[:args.labeled_bs, ...]
-            y_prob2 = F.softmax(y2, dim=1)
-            loss_seg += F.cross_entropy(y2[:args.labeled_bs], label_batch[:args.labeled_bs, ...].long())
-            loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...])
-
-            y_bg = outputs_bg[:args.labeled_bs, ...]
-            y_prob_bg = F.softmax(y_bg, dim=1)
-            loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], label_batch[:args.labeled_bs, ...].long())
-            loss_seg_dice += DICE(y_prob_bg, (label_batch[:args.labeled_bs, ...] == 0).long())
-
-            loss = (loss_seg + loss_seg_dice) / 2
-
-            iter_num += 1
-            writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
-            writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
-            writer.add_scalar('pre/loss_all', loss, iter_num)
-            logging.info("iter %d pre_loss %f", iter_num, loss)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            if iter_num % 400 == 0:
+            iter_num += 1
+
+            writer.add_scalar('info/total_loss', loss, iter_num)
+            writer.add_scalar('info/mix_dice', loss_dice, iter_num)
+            writer.add_scalar('info/mix_ce', loss_ce, iter_num)
+
+            logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
+
+            if iter_num % 20 == 0:
+                image = net_input[1, 0:1, :, :]
+                writer.add_image('pre_train/Mixed_Image', image, iter_num)
+                outputs = torch.argmax(torch.softmax(out_mixl, dim=1), dim=1, keepdim=True)
+                writer.add_image('pre_train/Mixed_Prediction', outputs[1, ...] * 50, iter_num)
+                labs = gt_mixl[1, ...].unsqueeze(0) * 50
+                writer.add_image('pre_train/Mixed_GroundTruth', labs, iter_num)
+
+            if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
-                dice_sample = val_all_case_ACDC(model, args.num_classes, args.patch_size, args.root_path)
-                if dice_sample > best_dice:
-                    best_dice = round(dice_sample, 4)
-                    save_mode_path = os.path.join(snapshot_path, f'iter_{iter_num}_dice_{best_dice}.pth')
-                    save_best_path = os.path.join(snapshot_path, f'{args.model}_best_model.pth')
+                metric_list = 0.0
+                for _, sampled_batch in enumerate(valloader):
+                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
+                                                         classes=num_classes)
+                    metric_list += np.array(metric_i)
+                metric_list = metric_list / len(db_val)
+                for class_i in range(num_classes - 1):
+                    writer.add_scalar('info/val_{}_dice'.format(class_i + 1), metric_list[class_i, 0], iter_num)
+                    writer.add_scalar('info/val_{}_hd95'.format(class_i + 1), metric_list[class_i, 1], iter_num)
+
+                performance = np.mean(metric_list, axis=0)[0]
+                writer.add_scalar('info/val_mean_dice', performance, iter_num)
+
+                if performance > best_performance:
+                    best_performance = performance
+                    save_mode_path = os.path.join(snapshot_path,
+                                                  'iter_{}_dice_{}.pth'.format(iter_num, round(best_performance, 4)))
+                    save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
                     save_net_opt(model, optimizer, save_mode_path)
                     save_net_opt(model, optimizer, save_best_path)
-                    logging.info("save best model to %s", save_mode_path)
-                writer.add_scalar('4_Var_dice/Dice', dice_sample, iter_num)
-                writer.add_scalar('4_Var_dice/Best_dice', best_dice, iter_num)
 
-            if iter_num >= pre_max_iterations:
+                logging.info('iteration %d : mean_dice : %f' % (iter_num, performance))
+                model.train()
+
+            if iter_num >= max_iterations:
                 break
-
-        if iter_num >= pre_max_iterations:
+        if iter_num >= max_iterations:
             iterator.close()
             break
     writer.close()
 
 
-def self_train(args, pre_snapshot_path, self_snapshot_path):
+def self_train(args, pre_snapshot_path, snapshot_path):
+    base_lr = args.base_lr
+    num_classes = args.num_classes
+    max_iterations = args.max_iterations
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    pre_trained_model = os.path.join(pre_snapshot_path, '{}_best_model.pth'.format(args.model))
+    labeled_sub_bs, unlabeled_sub_bs = int(args.labeled_bs / 2), int((args.batch_size - args.labeled_bs) / 2)
+
+    # model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes)
+    # ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     model = CVBMArgumentWithSKC2D(
         n_channels=1,
         n_classes=args.num_classes,
@@ -305,173 +462,241 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
         n_classes=args.num_classes,
         has_dropout=True,
     ).cuda()
+
     for param in ema_model.parameters():
-        param.detach_()
-    db_train = BaseDataSets(
-        base_dir=args.root_path,
-        split='train',
-        transform=transforms.Compose([
-            WeakStrongAugment(args.patch_size)
-        ]))
-    total_slices = len(db_train)
-    labeled_slice = min(patients_to_slices(args.root_path, args.labelnum), total_slices)
-    logging.info("Total slices: %d, labeled slices: %d", total_slices, labeled_slice)
-    labeled_idxs = list(range(labeled_slice))
-    unlabeled_idxs = list(range(labeled_slice, total_slices))
-    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
-                                          args.batch_size - args.labeled_bs)
-    sub_bs = int(args.labeled_bs / 2)
+        # param.detach_()  # ema_model set
+        param.requires_grad_(False)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    trainloader = DataLoader(
-        db_train,
-        batch_sampler=batch_sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        worker_init_fn=worker_init_fn,
-        pin_memory_device="cuda",
-        persistent_workers=True,
-    )
+    db_train = BaseDataSets(base_dir=args.root_path,
+                            split="train",
+                            num=None,
+                            transform=transforms.Compose([
+                                WeakStrongAugment(args.patch_size),
+                                CreateOnehotLabel(args.num_classes)
+                            ]))
+    db_val = BaseDataSets(base_dir=args.root_path, split="val")
+    total_slices = len(db_train)
+    labeled_slice = patients_to_slices(args.root_path, args.labelnum)
+    print("Total slices is: {}, labeled slices is:{}".format(total_slices, labeled_slice))
+    labeled_idxs = list(range(0, labeled_slice))
+
+    unlabeled_idxs = list(range(labeled_slice, total_slices))
+    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
+                                          args.batch_size - args.labeled_bs)
+
+    trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
+                             worker_init_fn=worker_init_fn)
+
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
+
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    
+    load_net(ema_model, pre_trained_model)
+    load_net_opt(model, optimizer, pre_trained_model)
+    logging.info("Loaded from {}".format(pre_trained_model))
+
+    writer = SummaryWriter(snapshot_path + '/log')
+    logging.info("Start self_training")
+    logging.info("{} iterations per epoch".format(len(trainloader)))
+
+    consistency_criterion = losses.mse_loss
     BCLLoss = losses.BlockContrastiveLoss()
 
-    pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
-    load_pretrained_backbone(model, pretrained_model)
-    load_pretrained_backbone(ema_model, pretrained_model)
-
-    writer = SummaryWriter(self_snapshot_path + '/log')
-    logging.info("%d itertations per epoch", len(trainloader))
     iter_num = 0
     max_epoch = self_max_iterations // len(trainloader) + 1
-    iterator = tqdm(range(max_epoch), ncols=70)
+    best_performance = 0.0
+    ema_best_performance = 0.0
+    iterator = tqdm(range(max_epoch), ncols=70)    
 
-    best_dice = 0
-    ema_best_dice = 0
-
-    for epoch in iterator:
+    for _ in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
             ema_model.train()
+            # volume_batch.shape, label_batch.shape, onehot_label_batch.shape
+            # torch.Size([24, 1, 256, 256]) torch.Size([24, 256, 256]) torch.Size([24, 4, 256, 256])
+            volume_batch, label_batch, onehot_label_batch = sampled_batch['image'], sampled_batch['label'], \
+                                                            sampled_batch['onehot_label']
+            volume_batch_strong, label_batch_strong, onehot_label_batch_strong = \
+                sampled_batch['image_strong'], sampled_batch['label_strong'], sampled_batch['onehot_label_strong']
+            volume_batch, label_batch, onehot_label_batch = volume_batch.cuda(), label_batch.cuda(), onehot_label_batch.cuda()
+            volume_batch_strong, label_batch_strong, onehot_label_batch_strong = \
+                volume_batch_strong.cuda(), label_batch_strong.cuda(), onehot_label_batch_strong.cuda()
 
-            volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
-            volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
-            img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:args.labeled_bs]
-            lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:args.labeled_bs]
-            unimg_a, unimg_b = volume_batch[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch[args.labeled_bs + sub_bs:]
+            img_a, img_b = volume_batch[:labeled_sub_bs], volume_batch[labeled_sub_bs:args.labeled_bs]
+            uimg_a, uimg_b = volume_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch[
+                                                                                                args.labeled_bs + unlabeled_sub_bs:]
+            ulab_a, ulab_b = label_batch[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch[
+                                                                                                args.labeled_bs + unlabeled_sub_bs:]
+            lab_a, lab_b = label_batch[:labeled_sub_bs], label_batch[labeled_sub_bs:args.labeled_bs]
+            lab_a_bg, lab_b_bg = onehot_label_batch[:labeled_sub_bs] == 0, onehot_label_batch[
+                                                                            labeled_sub_bs:args.labeled_bs] == 0
 
-            volume_batch_strong, label_batch_strong = sampled_batch['image_strong'], sampled_batch['label_strong']
-            volume_batch_strong, label_batch_strong = volume_batch_strong.cuda(), label_batch_strong.cuda()
-            img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
-            lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
-            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[args.labeled_bs + sub_bs:]
-
+            img_a_s, img_b_s = volume_batch_strong[:labeled_sub_bs], volume_batch_strong[labeled_sub_bs:args.labeled_bs]
+            uimg_a_s, uimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], volume_batch_strong[args.labeled_bs + unlabeled_sub_bs:]
+            ulab_a_s, ulab_b_s = label_batch_strong[args.labeled_bs:args.labeled_bs + unlabeled_sub_bs], label_batch_strong[
+                                                                                                args.labeled_bs + unlabeled_sub_bs:]
+            lab_a_s, lab_b_s = label_batch_strong[:labeled_sub_bs], label_batch_strong[labeled_sub_bs:args.labeled_bs]
+            lab_a_bg_s, lab_b_bg_s = onehot_label_batch_strong[:labeled_sub_bs] == 0, onehot_label_batch_strong[
+                                                                            labeled_sub_bs:args.labeled_bs] == 0
+            
             with torch.no_grad():
-                unoutput_a_fg, unoutput_a, unoutput_a_bg, _, _ = ema_model(unimg_a, unimg_a_s)
-                unoutput_b_fg, unoutput_b, unoutput_b_bg, _, _ = ema_model(unimg_b, unimg_b_s)
-                plab_a = get_cut_mask(unoutput_a, nms=1)
-                plab_b = get_cut_mask(unoutput_b, nms=1)
-                plab_a_fg = get_cut_mask(unoutput_a_fg, nms=1)
-                plab_b_fg = get_cut_mask(unoutput_b_fg, nms=1)
-                plab_a_bg = get_cut_mask(unoutput_a_bg, nms=1)
-                plab_b_bg = get_cut_mask(unoutput_b_bg, nms=1)
-                img_mask, loss_mask = context_mask_2d(img_a, args.mask_ratio)
+                pre_a_fg,pre_a, pre_a_bg_s, *_ = ema_model(uimg_a, uimg_a_s)
+                pre_b_fg,pre_b, pre_b_bg_s, *_ = ema_model(uimg_b, uimg_b_s)
 
-            mixl_img = img_a * img_mask + unimg_a * (1 - img_mask)
-            mixu_img = unimg_b * img_mask + img_b * (1 - img_mask)
-            mixl_img_s = img_a_s * img_mask + unimg_a_s * (1 - img_mask)
-            mixu_img_s = unimg_b_s * img_mask + img_b_s * (1 - img_mask)
+                plab_a_fg = get_ACDC_masks_with_confidence(pre_a_fg, nms=1)
+                plab_b_fg = get_ACDC_masks_with_confidence(pre_b_fg, nms=1)
 
-            mixl_lab = lab_a * img_mask + plab_a * (1 - img_mask)
-            mixu_lab = plab_b * img_mask + lab_b * (1 - img_mask)
-
-            outputs_l_fg, outputs_l, outputs_l_bg, _, _ = model(mixl_img, mixl_img_s)
-            outputs_u_fg, outputs_u, outputs_u_bg, _, _ = model(mixu_img, mixu_img_s)
-
-            output_mix_bg_fg = torch.cat([outputs_l, outputs_u], dim=0)
-
+                plab_a_bg_s = get_ACDC_masks_with_confidence(pre_a_bg_s, nms=1,onehot=True)
+                plab_b_bg_s = get_ACDC_masks_with_confidence(pre_b_bg_s, nms=1,onehot=True)
+                
+                img_mask, loss_mask, onehot_mask = generate_mask(img_a, args.num_classes)
+                unl_label = ulab_a * img_mask + lab_a * (1 - img_mask)
+                l_label = lab_b * img_mask + ulab_b * (1 - img_mask)
             consistency_weight = get_current_consistency_weight(iter_num // 150)
+            # net_input_unl, net_input_l
+            # torch.Size([6, 1, 256, 256]) torch.Size([6, 1, 256, 256])
+            net_input_unl = uimg_a * img_mask + img_a * (1 - img_mask)
+            net_input_l = img_b * img_mask + uimg_b * (1 - img_mask)
+            net_input = torch.cat([net_input_unl, net_input_l], dim=0)
 
-            loss_l = mix_loss(outputs_l_fg, mixl_lab, plab_a_fg, loss_mask, u_weight=args.u_weight)
-            loss_u = mix_loss(outputs_u_fg, mixu_lab, plab_b_fg, loss_mask, u_weight=args.u_weight, unlab=True)
-            loss_l_bg = mix_loss(outputs_l_bg, (mixl_lab == 0).long(), plab_a_bg, loss_mask, u_weight=args.u_weight)
-            loss_u_bg = mix_loss(outputs_u_bg, (mixu_lab == 0).long(), plab_b_bg, loss_mask, u_weight=args.u_weight, unlab=True)
+            net_input_unl_s = uimg_a_s * img_mask + img_a_s * (1 - img_mask)
+            net_input_l_s = img_b_s * img_mask + uimg_b_s * (1 - img_mask)
+            net_input_s = torch.cat([net_input_unl_s, net_input_l_s], dim=0)
 
-            pos_patches, neg_patches = select_patches_for_contrast_2d(
-                output_mix_bg_fg,
-                topnum=32,
-                patch_size=(8, 8),
-                choose_largest=False)
+            # out_unl_fg,out_unl, out_unl_bg
+            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
+            out_unl_fg,out_unl, out_unl_bg, *_ = model(net_input_unl, net_input_unl_s)
+            # out_l_fg,out_l, out_l_bg
+            # torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256]) torch.Size([6, 4, 256, 256])
+            out_l_fg,out_l, out_l_bg, *_ = model(net_input_l, net_input_l_s)
+
+            # conv 3x3 connect
+            output_mix = torch.cat([out_unl, out_l], dim=0)
+
+            unl_dice, unl_ce = mix_loss(out_unl_fg, plab_a_fg, lab_a, loss_mask, u_weight=args.u_weight, unlab=True)
+            l_dice, l_ce = mix_loss(out_l_fg, lab_b, plab_b_fg, loss_mask, u_weight=args.u_weight)
+
+            unl_dice_bg, unl_ce_bg = onehot_mix_loss(out_unl_bg, plab_a_bg_s, lab_a_bg_s, onehot_mask,
+                                                        u_weight=args.u_weight, unlab=True)
+            l_dice_bg, l_ce_bg = onehot_mix_loss(out_l_bg, lab_b_bg_s, plab_b_bg_s, onehot_mask, u_weight=args.u_weight)
+
+            loss_ce = unl_ce + l_ce + unl_ce_bg+ l_ce_bg
+            loss_dice = unl_dice + l_dice + unl_dice_bg + l_dice_bg
+
+            pos_patches, neg_patches = select_patches_for_contrast(output_mix, topnum=64, patch_size=(8, 8))
+            # 现在形状满足你的要求：
+            #   pos_patches: [B, 16, C] 作为正样本（低置信度）
+            #   neg_patches: [B, L-16, C] 作为负样本
             bclloss = BCLLoss(pos_patches, neg_patches)
 
-            loss = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * bclloss
-
-            iter_num += 1
-            writer.add_scalar('Self/consistency', consistency_weight, iter_num)
-            writer.add_scalar('Self/loss_l', loss_l, iter_num)
-            writer.add_scalar('Self/loss_u', loss_u, iter_num)
-            writer.add_scalar('Self/loss_l_bg', loss_l_bg, iter_num)
-            writer.add_scalar('Self/loss_u_bg', loss_u_bg, iter_num)
-            writer.add_scalar('Self/bclloss', bclloss, iter_num)
-            writer.add_scalar('Self/loss_all', loss, iter_num)
+            loss = loss_dice + loss_ce + consistency_weight * bclloss
+            # loss =loss_dice + loss_ce + consistency_weight * (loss_consist_l + loss_consist_u)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info('iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_bcl: %03f',
-                         iter_num, loss, loss_l, loss_u, bclloss)
 
-            update_ema_variables(model, ema_model, 0.99)
+            iter_num += 1
+            update_model_ema(model, ema_model, 0.99)
 
-            if iter_num % 400 == 0:
+            writer.add_scalar('info/total_loss', loss, iter_num)
+            writer.add_scalar('info/mix_dice', loss_dice, iter_num)
+            writer.add_scalar('info/mix_ce', loss_ce, iter_num)
+            writer.add_scalar('info/consistency_weight', consistency_weight, iter_num)
+
+            logging.info('iteration %d: loss: %f, mix_dice: %f, mix_ce: %f' % (iter_num, loss, loss_dice, loss_ce))
+
+            if iter_num % 20 == 0:
+                image = net_input_unl[1, 0:1, :, :]
+                writer.add_image('train/Un_Image', image, iter_num)
+                outputs = torch.argmax(torch.softmax(out_unl, dim=1), dim=1, keepdim=True)
+                writer.add_image('train/Un_Prediction', outputs[1, ...] * 50, iter_num)
+                labs = unl_label[1, ...].unsqueeze(0) * 50
+                writer.add_image('train/Un_GroundTruth', labs, iter_num)
+
+                image_l = net_input_l[1, 0:1, :, :]
+                writer.add_image('train/L_Image', image_l, iter_num)
+                outputs_l = torch.argmax(torch.softmax(out_l, dim=1), dim=1, keepdim=True)
+                writer.add_image('train/L_Prediction', outputs_l[1, ...] * 50, iter_num)
+                labs_l = l_label[1, ...].unsqueeze(0) * 50
+                writer.add_image('train/L_GroundTruth', labs_l, iter_num)
+
+            if iter_num > 0 and iter_num % 200 == 0:
                 model.eval()
                 ema_model.eval()
-                dice_sample = val_all_case_ACDC(model, args.num_classes, args.patch_size, args.root_path)
-                ema_dice_sample = val_all_case_ACDC(ema_model, args.num_classes, args.patch_size, args.root_path)
-                if dice_sample > best_dice:
-                    best_dice = round(dice_sample, 7)
-                    save_mode_path = os.path.join(self_snapshot_path, f'iter_{iter_num}_dice_{best_dice}.pth')
-                    save_best_path = os.path.join(self_snapshot_path, f'{args.model}_best_model.pth')
+                metric_list = 0.0
+                ema_metric_list = 0.0
+                for _, sampled_batch in enumerate(valloader):
+                    metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], model,
+                                                         classes=num_classes)
+                    ema_metric_i = val_2d.test_single_volume_argument(sampled_batch["image"], sampled_batch["label"], ema_model,
+                                                         classes=num_classes)
+                    metric_list += np.array(metric_i)
+                    ema_metric_list += np.array(ema_metric_i)
+                metric_list = metric_list / len(db_val)
+                for class_i in range(num_classes - 1):
+                    writer.add_scalar('info/val_{}_dice'.format(class_i + 1), metric_list[class_i, 0], iter_num)
+                    writer.add_scalar('info/val_{}_hd95'.format(class_i + 1), metric_list[class_i, 1], iter_num)
+
+                performance = np.mean(metric_list, axis=0)[0]
+                ema_performance = np.mean(ema_metric_list, axis=0)[0]
+                
+                writer.add_scalar('info/val_mean_dice', performance, iter_num)
+
+                if performance > best_performance:
+                    best_performance = performance
+                    save_mode_path = os.path.join(snapshot_path,
+                                                  'iter_{}_dice_{}.pth'.format(iter_num, round(best_performance, 4)))
+                    save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
-                    logging.info("save best model to %s", save_mode_path)
-                if ema_dice_sample > ema_best_dice:
-                    ema_best_dice = round(ema_dice_sample, 7)
-                    save_mode_path = os.path.join(self_snapshot_path, f'iter_{iter_num}_ema_dice_{ema_best_dice}.pth')
-                    save_ema_best_path = os.path.join(self_snapshot_path, f'{args.model}_ema_best_model.pth')
-                    torch.save(ema_model.state_dict(), save_mode_path)
-                    torch.save(ema_model.state_dict(), save_ema_best_path)
-                    logging.info("save best ema model to %s", save_mode_path)
-                writer.add_scalar('4_Var_dice/Dice', ema_dice_sample, iter_num)
-                writer.add_scalar('4_Var_dice/Best_dice', ema_best_dice, iter_num)
-                model.train()
+                if ema_performance > ema_best_performance:
+                    ema_best_performance = ema_performance
+                    ema_save_mode_path = os.path.join(snapshot_path,
+                                                  'iter_ema_{}_dice_{}.pth'.format(iter_num, round(ema_best_performance, 4)))
+                    ema_save_best_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
+                    torch.save(model.state_dict(), ema_save_mode_path)
+                    torch.save(model.state_dict(), ema_save_best_path)
+                logging.info('iteration %d : mean_dice : %f' % (iter_num, performance))
+                logging.info('iteration %d : mean_dice : %f' % (iter_num, ema_performance))
+                
 
-            if iter_num >= self_max_iterations:
+            if iter_num >= max_iterations:
                 break
-
-        if iter_num >= self_max_iterations:
+        if iter_num >= max_iterations:
             iterator.close()
             break
     writer.close()
 
 
 if __name__ == "__main__":
+    if args.deterministic:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed(args.seed)
+
+    # -- path to save models
     pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
     self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
-    print("Starting ACDC training with SKC2D.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
-        if os.path.exists(snapshot_path + '/code'):
-            shutil.rmtree(snapshot_path + '/code')
+    shutil.copy(os.path.abspath(__file__), self_snapshot_path)
 
+    # Pre_train
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
     pre_train(args, pre_snapshot_path)
 
+    # Self_train
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
