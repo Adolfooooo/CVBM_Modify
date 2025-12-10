@@ -5,7 +5,7 @@ import pdb
 
 from networks.net_factory import net_factory
 from utils.test_3d_patch import test_all_case, test_all_case_argument
-from .skc3d_module import CVBMArgumentWithSKC3D
+from .modulesw import CVBMArgumentWithSKC3D
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Experiment')

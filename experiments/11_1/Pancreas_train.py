@@ -20,7 +20,7 @@ import numpy as np
 
 from utils import losses, ramps, test_3d_patch
 from dataloaders.datasets_3d import WeakStrongAugment3d, Pancreas, TwoStreamBatchSampler
-from .skc3d_module import CVBMArgumentWithSKC3D
+from .modules import CVBMArgumentWithSKC3D
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 

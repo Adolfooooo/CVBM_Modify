@@ -5,7 +5,7 @@ import h5py
 import numpy as np
 
 from utils import val_2d
-from .skc2d_module import CVBMArgumentWithSKC2D
+from .modules import CVBMArgumentWithSKC2D
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of dataset root')

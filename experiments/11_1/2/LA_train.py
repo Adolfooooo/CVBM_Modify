@@ -23,7 +23,7 @@ from utils import losses, ramps, test_3d_patch
 # from dataloaders.dataset import *
 from dataloaders.dataset import LAHeart, RandomRotFlip, RandomCrop, ToTensor, TwoStreamBatchSampler, DualAugmentTransform
 from dataloaders.datasets_3d import WeakStrongAugment3d
-from .skc3d_module import CVBMArgumentWithSKC3D
+from ..modules import CVBMArgumentWithSKC3D
 from networks.net_factory import net_factory
 from utils.util import compute_sdf, compute_sdf_bg
 from utils.BCP_utils import context_mask, mix_loss, update_ema_variables

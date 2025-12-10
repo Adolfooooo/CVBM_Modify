@@ -3,7 +3,7 @@ import argparse
 import torch
 
 from utils.test_3d_patch import test_all_case_argument
-from .skc3d_module import CVBMArgumentWithSKC3D
+from .modules import CVBMArgumentWithSKC3D
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of dataset root')

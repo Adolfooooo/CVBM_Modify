@@ -25,7 +25,7 @@ from networks.net_factory import net_factory
 from utils import losses, ramps, feature_memory, contrastive_losses, val_2d, create_onehot
 from utils.dynamic_threhold.DynamicThresholdUpdater import DynamicThresholdUpdater
 from networks.CVBM import CVBM, CVBM_Argument
-from .module.skc2d_module import CVBMArgumentWithSKC2D
+from .modules.skc2d_module import CVBMArgumentWithSKC2D
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/ACDC', help='Name of Experiment')
