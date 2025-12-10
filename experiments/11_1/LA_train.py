@@ -245,7 +245,7 @@ def pre_train(args, snapshot_path):
             volume_batch = img_a * img_mask + img_b * (1 - img_mask)
             label_batch = lab_a * img_mask + lab_b * (1 - img_mask)
 
-            outputs_fg,outputs, outputs_bg, out_tanh, out_tanh_bg = model(volume_batch, volume_batch)
+            outputs_fg, outputs, outputs_bg, *_ = model(volume_batch, volume_batch)
             loss_seg = 0
             loss_seg_dice = 0
             loss_sdf = 0

@@ -21,7 +21,7 @@ import numpy as np
 from utils import losses, ramps, test_3d_patch
 from dataloaders.brats19.brats19_dataset import BRATSDataset
 from dataloaders.datasets_3d import WeakStrongAugment3d, TwoStreamBatchSampler
-from .skc3d_module import CVBMArgumentWithSKC3D
+from .module import CVBMArgumentWithSKC3D
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
@@ -56,19 +56,13 @@ parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_11_1/1/
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
+with open(args.root_path + '/test.list', 'r') as f:
+    image_list = f.readlines()
+image_list = [args.root_path + "/data/" + item.replace('\n', '') + ".h5" for item in image_list]    
 
 def get_cut_mask(out, thres=0.5, nms=0):
     probs = F.softmax(out, 1)
     masks = (probs >= thres).type(torch.int64)
-    masks = masks[:, 1, :, :].contiguous()
-    if nms == 1:
-        masks = LargestCC(masks)
-    return masks
-
-
-def get_cut_mask_bg(out, thres=0.5, nms=0):
-    probs = F.softmax(out, 1)
-    masks = (probs <= thres).type(torch.int64)
     masks = masks[:, 1, :, :].contiguous()
     if nms == 1:
         masks = LargestCC(masks)
@@ -245,7 +239,9 @@ def pre_train(args, snapshot_path):
             optimizer.step()
             logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f', iter_num, loss, loss_seg_dice, loss_seg)
 
-            if iter_num % 400 == 0:
+            if iter_num % 200 == 0:
+                # snapshot_path = "{}/{}_{}_labeled/{}".format(args.snapshot_path, args.exp, args.labelnum, args.stage_name)
+                test_save_path = "{}/{}_{}_labeled/{}_predictions/".format(args.snapshot_path, args.exp, args.labelnum, args.model)
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
                     model,
@@ -254,6 +250,10 @@ def pre_train(args, snapshot_path):
                     stride_xy=18,
                     stride_z=4,
                     dataset_path=args.root_path)
+                # dice_sample = test_3d_patch.test_all_case_argument(model, image_list, num_classes=args.num_classes,
+                #            patch_size=args.patch_size, stride_xy=16, stride_z=16,
+                #            save_result=False, test_save_path=test_save_path,
+                #            metric_detail=1, nms=0)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
                     save_mode_path = os.path.join(snapshot_path, f'iter_{iter_num}_dice_{best_dice}.pth')

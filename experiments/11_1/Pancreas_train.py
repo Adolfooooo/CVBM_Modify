@@ -65,15 +65,6 @@ def get_cut_mask(out, thres=0.5, nms=0):
     return masks
 
 
-def get_cut_mask_bg(out, thres=0.5, nms=0):
-    probs = F.softmax(out, 1)
-    masks = (probs <= thres).type(torch.int64)
-    masks = masks[:, 1, :, :].contiguous()
-    if nms == 1:
-        masks = LargestCC(masks)
-    return masks
-
-
 def LargestCC(segmentation):
     N = segmentation.shape[0]
     batch_list = []

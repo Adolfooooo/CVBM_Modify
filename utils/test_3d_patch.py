@@ -352,7 +352,7 @@ def test_all_case(model, image_list, num_classes, patch_size=(112, 112, 80), str
 
 def test_all_case_argument(model, image_list, num_classes, patch_size=(112, 112, 80), stride_xy=18, stride_z=4, save_result=True,
                   test_save_path=None, preproc_fn=None, metric_detail=0, nms=0):
-    loader = tqdm(image_list) if not metric_detail else image_list
+    loader = tqdm(image_list)
     total_metric = 0.0
     ith = 0
     for image_path in loader:
@@ -393,6 +393,11 @@ def test_all_case_argument(model, image_list, num_classes, patch_size=(112, 112,
     return avg_metric
 
 
+'''
+For LA dataset, stride_xy=18, stride_z=4, patch_size=(112, 112, 80)
+For BRATS19 dataset, stride_xy=16, stride_z=16, patch_size=(96, 96, 96)
+For Pancreas dataset, stride_xy=16, stride_z=16, patch_size=(96, 96, 96)
+'''
 def test_single_case(model, image, stride_xy, stride_z, patch_size, num_classes=1):
     w, h, d = image.shape
 
