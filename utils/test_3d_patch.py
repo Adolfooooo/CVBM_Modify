@@ -505,7 +505,7 @@ def test_single_case_argument(model, image, stride_xy, stride_z, patch_size, num
 
                 with torch.no_grad():
                     # y1: ([1, 2, 96, 96, 96])
-                    y1, _, _, _, _ = model(test_patch, test_patch)
+                    y1, *_ = model(test_patch, test_patch)
                     # y1,_= model(test_patch)
                     y = F.softmax(y1, dim=1)
 
