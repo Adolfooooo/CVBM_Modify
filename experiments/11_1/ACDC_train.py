@@ -46,7 +46,8 @@ parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlab
 # costs
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--consistency', type=float, default=0.1, help='consistency')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_4_6_3/1', help='snapshot_path')
+parser.add_argument('--consistency_rampup', type=float, default=200.0, help='consistency_rampup')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_11_1/1', help='snapshot_path')
 
 args = parser.parse_args()
 pre_max_iterations = args.pre_iterations
