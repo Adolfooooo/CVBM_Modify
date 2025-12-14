@@ -155,7 +155,10 @@ def pre_train(args, snapshot_path):
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:]
             with torch.no_grad():
-                img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
+                # 这里似乎原论文有误，我采用新的方式进行, 方法同样为原论文给出
+                # img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
+                img_mask, loss_mask = context_mask_pancreas(img_a, args.mask_ratio)
+                
 
             """Mix Input"""
             volume_batch = img_a * img_mask + img_b * (1 - img_mask)
@@ -277,7 +280,10 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 plab_b_fg = get_cut_mask(unoutput_b_fg, nms=1)
                 plab_a_bg = get_cut_mask(unoutput_a_bg, nms=1)
                 plab_b_bg = get_cut_mask(unoutput_b_bg, nms=1)
-                img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
+                # 这里似乎原论文有误，我采用新的方式进行
+                # img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
+                img_mask, loss_mask = context_mask_pancreas(img_a, args.mask_ratio)
+                
 
             mixl_img = img_a * img_mask + unimg_a * (1 - img_mask)
             mixu_img = unimg_b * img_mask + img_b * (1 - img_mask)
