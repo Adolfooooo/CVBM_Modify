@@ -32,37 +32,37 @@ image_list = ["{}/data/".format(args.root_path) + item.replace('\n', '') + "_nor
 
 def test_calculate_metric():
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="test")
-    ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="test")
+    # ema_model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="test")
     save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
-    ema_model_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
+    # ema_model_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
 
     model.load_state_dict(torch.load(save_model_path))
-    ema_model.load_state_dict(torch.load(ema_model_path))
+    # ema_model.load_state_dict(torch.load(ema_model_path))
 
     print("init weight from {}".format(save_model_path))
-    print("init weight from {}".format(ema_model_path))
+    # print("init weight from {}".format(ema_model_path))
 
     model.eval()
-    ema_model.eval()
+    # ema_model.eval()
 
     if args.model == "CVBM":
         avg_metric = test_all_case(model, image_list, num_classes=num_classes,
                             patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
                             save_result=False, test_save_path=test_save_path,
                             metric_detail=args.detail, nms=args.nms)
-        avg_ema_metric = test_all_case(ema_model, image_list, num_classes=num_classes,
-                            patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
-                            save_result=False, test_save_path=test_save_path,
-                            metric_detail=args.detail, nms=args.nms)
+        # avg_ema_metric = test_all_case(ema_model, image_list, num_classes=num_classes,
+        #                     patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
+        #                     save_result=False, test_save_path=test_save_path,
+        #                     metric_detail=args.detail, nms=args.nms)
     elif args.model == "CVBM_Argument":
         avg_metric = test_all_case_argument(model, image_list, num_classes=num_classes,
                             patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
                             save_result=False, test_save_path=test_save_path,
                             metric_detail=args.detail, nms=args.nms)
-        avg_ema_metric = test_all_case_argument(ema_model, image_list, num_classes=num_classes,
-                            patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
-                            save_result=False, test_save_path=test_save_path,
-                            metric_detail=args.detail, nms=args.nms)
+        # avg_ema_metric = test_all_case_argument(ema_model, image_list, num_classes=num_classes,
+        #                     patch_size=(96, 96, 96), stride_xy=16, stride_z=16,
+        #                     save_result=False, test_save_path=test_save_path,
+        #                     metric_detail=args.detail, nms=args.nms)
     
     return avg_metric, avg_ema_metric
 
@@ -70,5 +70,5 @@ def test_calculate_metric():
 if __name__ == '__main__':
     metric, avg_ema_metric = test_calculate_metric()
     print(metric)
-    print(avg_ema_metric)
+    # print(avg_ema_metric)
 # python test_LA.py --model 0214_re01 --gpu 0
