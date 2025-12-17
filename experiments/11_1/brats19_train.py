@@ -381,7 +381,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
             pos_patches, neg_patches = select_patches_for_contrast_3d(
                 output_mix_bg_fg,
-                topnum=20,
+                topnum=250,
                 patch_size=(8, 8, 8),
                 choose_largest=False)
             bclloss = BCLLoss(pos_patches, neg_patches)
