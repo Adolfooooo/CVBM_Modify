@@ -388,8 +388,15 @@ def test_all_case_argument(model, image_list, num_classes, patch_size=(112, 112,
     avg_metric = total_metric / len(image_list)
     print('average metric is {}'.format(avg_metric))
 
-    with open(test_save_path + '../performance.txt', 'w') as f:
-        f.writelines('average metric is {} \n'.format(avg_metric))
+    # 定义路径
+    file_path = os.path.join(test_save_path, '../performance.txt')
+
+    # 判断是否存在
+    if os.path.exists(file_path):
+        with open(file_path, 'w') as f:
+            f.writelines('average metric is {} \n'.format(avg_metric))
+    else:
+        print("文件 performance.txt 不存在，跳过执行。")
     return avg_metric
 
 

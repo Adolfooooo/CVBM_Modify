@@ -1,5 +1,6 @@
 import os
 import argparse
+import ast
 import torch
 import pdb
 
@@ -9,7 +10,7 @@ from .modules import CVBMArgumentWithSKC3D
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Experiment')
-parser.add_argument('--exp', type=str,  default='CVBM_BRATS19', help='exp_name')
+parser.add_argument('--exp', type=str,  default='CVBM_', help='exp_name')
 parser.add_argument('--model', type=str,  default='CVBMArgumentWithSKC3D', help='model_name')
 parser.add_argument('--gpu', type=str,  default='0', help='GPU to use')
 parser.add_argument('--detail', type=int,  default=1, help='print metrics for every samples')
@@ -17,13 +18,19 @@ parser.add_argument('--nms', type=int, default=1, help='apply NMS post-procssing
 parser.add_argument('--labelnum', type=int, default=25, help='labeled data')
 parser.add_argument('--patch_size', type=tuple, default=(96, 96, 96))
 parser.add_argument('--stage_name',type=str, default='self_train', help='self_train or pre_train')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_11_1/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results', help='snapshot path to save model')
+parser.add_argument('--topnum', type=int, default=64, help='contrastive topnum')
+parser.add_argument('--train_num', type=int, default=1, help='the count of train')
+parser.add_argument('--contrast_patch', type=str, default="(8, 8, 8)", help='the patch of contrastive learning')
 
 args = parser.parse_args()
 
+if args.contrast_patch:
+    args.contrast_patch = ast.literal_eval(args.contrast_patch)
+
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
-snapshot_path = "{}/{}_{}_labeled/{}".format(args.snapshot_path, args.exp, args.labelnum, args.stage_name)
-test_save_path = "{}/{}_{}_labeled/{}_predictions/".format(args.snapshot_path, args.exp, args.labelnum, args.model)
+snapshot_path = "{}/{}/brats19/label{}/topnum{}_patch{}/{}/{}".format(args.snapshot_path, args.exp, args.labelnum, args.topnum, args.contrast_patch, args.train_num, args.stage_name)
+test_save_path = "{}/{}/brats19/label{}/topnum{}_patch{}/{}/{}_predictions".format(args.snapshot_path, args.exp, args.labelnum, args.topnum, args.contrast_patch, args.train_num, args.model)
 num_classes = 2
 
 if not os.path.exists(test_save_path):

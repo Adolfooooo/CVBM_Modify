@@ -1,6 +1,7 @@
 import sys
 import os
 import argparse
+import ast
 import logging
 import shutil
 import random
@@ -27,7 +28,7 @@ from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variable
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/BRATS19', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_BRATS19', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_11_1', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
@@ -45,6 +46,9 @@ parser.add_argument('--num_workers', type=int, default=8, help='cpu core num_wor
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='10.0', help='magnitude')
+parser.add_argument('--topnum', type=int, default=64, help='contrastive topnum')
+parser.add_argument('--train_num', type=int, default=1, help='the count of train')
+parser.add_argument('--contrast_patch', type=str, default="(8, 8, 8)", help='the patch of contrastive learning')
 # -- setting of BANET
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of mask/image')
@@ -52,9 +56,12 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_11_1/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
+
+if args.contrast_patch:
+    args.contrast_patch = ast.literal_eval(args.contrast_patch)
 
 with open(args.root_path + '/test.list', 'r') as f:
     image_list = f.readlines()
@@ -247,8 +254,8 @@ def pre_train(args, snapshot_path):
                     model,
                     num_classes=args.num_classes,
                     patch_size=patch_size,
-                    stride_xy=18,
-                    stride_z=4,
+                    stride_xy=64,
+                    stride_z=64,
                     dataset_path=args.root_path)
                 # dice_sample = test_3d_patch.test_all_case_argument(model, image_list, num_classes=args.num_classes,
                 #            patch_size=args.patch_size, stride_xy=16, stride_z=16,
@@ -381,8 +388,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
             pos_patches, neg_patches = select_patches_for_contrast_3d(
                 output_mix_bg_fg,
-                topnum=250,
-                patch_size=(8, 8, 8),
+                topnum=args.topnum,# test best 250
+                patch_size=args.contrast_patch,
                 choose_largest=False)
             bclloss = BCLLoss(pos_patches, neg_patches)
 
@@ -412,15 +419,15 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                     model,
                     num_classes=args.num_classes,
                     patch_size=patch_size,
-                    stride_xy=18,
-                    stride_z=4,
+                    stride_xy=64,
+                    stride_z=64,
                     dataset_path=args.root_path)
                 ema_dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
                     ema_model,
                     num_classes=args.num_classes,
                     patch_size=patch_size,
-                    stride_xy=18,
-                    stride_z=4,
+                    stride_xy=64,
+                    stride_z=64,
                     dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 7)
@@ -498,8 +505,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 
 if __name__ == "__main__":
-    pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
-    self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
+    pre_snapshot_path = "{}/{}/brats19/label{}/topnum{}_patch{}/{}/pre_train".format(args.snapshot_path, args.exp, args.labelnum, args.topnum, args.contrast_patch, args.train_num)
+    self_snapshot_path = "{}/{}/brats19/label{}/topnum{}_patch{}/{}/self_train".format(args.snapshot_path, args.exp, args.labelnum, args.topnum, args.contrast_patch, args.train_num)
     print("Starting BRATS19 training with SKC3D.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
