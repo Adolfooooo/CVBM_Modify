@@ -194,3 +194,92 @@ class CVBMArgumentWithSKC3D(nn.Module):
 
         fused_logits = self.final_seg(torch.cat([out_fg, out_bg], dim=1))
         return out_fg, fused_logits, out_bg, attn_fg, attn_bg
+
+class CVBMArgumentWithSKC3D_finaltwoconv(nn.Module):
+    """CVBM_Argument backbone with the SKC module between encoder and decoders.
+
+    The architecture keeps the same shared encoder as :class:`CVBM_Argument`, but
+    the highest-level features of both streams are refined through
+    :class:`SemanticKnowledgeComplementarity3D` before being fed into the
+    foreground (weak augmentation) and background (strong augmentation) decoders.
+
+    Args:
+        n_channels: Number of input channels (1 for the LA dataset).
+        n_classes: Number of segmentation classes.
+        n_filters: Base channel width used by the encoder/decoder pyramid.
+        normalization: Normalization type passed to the building blocks.
+        has_dropout: Whether to enable the decoder dropout that exists in CVBM.
+        has_residual: Whether to use residual convolutions inside the blocks.
+    """
+
+    def __init__(
+        self,
+        n_channels: int = 1,
+        n_classes: int = 2,
+        n_filters: int = 16,
+        normalization: str = "instancenorm",
+        has_dropout: bool = False,
+        has_residual: bool = False,
+    ) -> None:
+        super().__init__()
+        self.encoder = Encoder(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+        )
+        self.decoder_fg = Decoder(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+            up_type=0,
+        )
+        self.decoder_bg = Decoder(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+            up_type=2,
+        )
+        self.skc = SemanticKnowledgeComplementarity3D(channels=n_filters * 16)
+
+        self.final_seg_1 = nn.Conv3d(n_classes * 2, n_classes, kernel_size=1)
+        self.final_seg_2 = nn.Conv3d(n_classes, n_classes, kernel_size=1)
+
+    def forward(
+        self,
+        input_fg: torch.Tensor,
+        input_bg: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Runs the two-stream segmentation backbone with SKC in between.
+
+        Args:
+            input_fg: Weak/foreground-augmented tensor ``[B, 1, D, H, W]``.
+            input_bg: Strong/background-augmented tensor ``[B, 1, D, H, W]``.
+
+        Returns:
+            Tuple containing (foreground logits, fused logits, background logits,
+            foreground attention logits, background attention logits).
+        """
+
+        fg_feats = list(self.encoder(input_fg))
+        bg_feats = list(self.encoder(input_bg))
+
+        # Insert SKC right before the decoder stage so both heads receive
+        # complementary semantics.
+        fg_feats[-1], bg_feats[-1] = self.skc(fg_feats[-1], bg_feats[-1])
+
+        out_fg, attn_fg = self.decoder_fg(fg_feats)
+        out_bg, attn_bg = self.decoder_bg(bg_feats)
+
+        mix_out = torch.cat([out_fg, out_bg])
+        fused_logits = self.final_seg_1(mix_out, dim=1)
+        fused_logits = self.final_seg_2(fused_logits, dim=1)
+        return out_fg, fused_logits, out_bg, attn_fg, attn_bg

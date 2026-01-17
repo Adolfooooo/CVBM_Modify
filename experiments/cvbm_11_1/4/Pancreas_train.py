@@ -20,7 +20,7 @@ import numpy as np
 
 from utils import losses, ramps, test_3d_patch
 from dataloaders.datasets_3d import WeakStrongAugment3d, Pancreas, TwoStreamBatchSampler
-from .modules import CVBMArgumentWithSKC3D
+from ..modules import CVBMArgumentWithSKC3D_finaltwoconv
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
@@ -53,7 +53,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_11_1/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
@@ -302,13 +302,13 @@ def pre_train(args, snapshot_path):
 
 
 def self_train(args, pre_snapshot_path, self_snapshot_path):
-    model = CVBMArgumentWithSKC3D(
+    model = CVBMArgumentWithSKC3D_finaltwoconv(
         n_channels=1,
         n_classes=num_classes,
         normalization='instancenorm',
         has_dropout=True,
     ).cuda()
-    ema_model = CVBMArgumentWithSKC3D(
+    ema_model = CVBMArgumentWithSKC3D_finaltwoconv(
         n_channels=1,
         n_classes=num_classes,
         normalization='instancenorm',
