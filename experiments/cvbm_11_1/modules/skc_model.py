@@ -279,7 +279,7 @@ class CVBMArgumentWithSKC3D_finaltwoconv(nn.Module):
         out_fg, attn_fg = self.decoder_fg(fg_feats)
         out_bg, attn_bg = self.decoder_bg(bg_feats)
 
-        mix_out = torch.cat([out_fg, out_bg])
-        fused_logits = self.final_seg_1(mix_out, dim=1)
-        fused_logits = self.final_seg_2(fused_logits, dim=1)
+        mix_out = torch.cat([out_fg, out_bg], dim=1)
+        fused_logits = self.final_seg_1(mix_out)
+        fused_logits = self.final_seg_2(fused_logits)
         return out_fg, fused_logits, out_bg, attn_fg, attn_bg
