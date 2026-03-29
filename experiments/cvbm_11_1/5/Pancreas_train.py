@@ -219,13 +219,23 @@ def pre_train(args, snapshot_path):
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:]
+
+            volume_batch_strong, label_batch_strong = sampled_batch['image_strong'], sampled_batch['label_strong']
+            volume_batch_strong, label_batch_strong = volume_batch_strong.cuda(), label_batch_strong.cuda()
+            img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
+            lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
+            lab_a_s_bg, lab_b_s_bg = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0
+            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[args.labeled_bs + sub_bs:]
             with torch.no_grad():
                 img_mask, loss_mask = context_mask_pancreas(img_a, args.mask_ratio)
 
             volume_batch = img_a * img_mask + img_b * (1 - img_mask)
             label_batch = lab_a * img_mask + lab_b * (1 - img_mask)
 
-            outputs_fg, outputs, outputs_bg, out_tanh, out_tanh_bg = model(volume_batch, volume_batch)
+            volume_batch_strong = img_a_s * img_mask + img_b_s * (1 - img_mask)
+            label_batch_strong = lab_a_s * img_mask + lab_b_s * (1 - img_mask)
+
+            outputs_fg, outputs, outputs_bg, out_tanh, out_tanh_bg = model(volume_batch, volume_batch_strong)
             loss_seg = 0
             loss_seg_dice = 0
 
@@ -234,20 +244,15 @@ def pre_train(args, snapshot_path):
             loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
             loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
 
-            # loss_seg += focal_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-            # loss_seg_dice += binary_tversky_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-
             y_bg = outputs_bg[:args.labeled_bs, ...]
-            # loss_seg += focal_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-            # loss_seg_dice += binary_tversky_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-             
             y_prob_bg = F.softmax(y_bg, dim=1)
-            loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
-            loss_seg_dice += DICE(y_prob_bg, label_batch[:args.labeled_bs, ...] == 0)
+            loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch_strong[:args.labeled_bs, ...] == 0).long())
+            loss_seg_dice += DICE(y_prob_bg, label_batch_strong[:args.labeled_bs, ...] == 0)
+
             loss = (loss_seg + loss_seg_dice) / 2
-            # logging.info("y_prob2: {}, y_prob_bg: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), torch.argmax(y_prob_bg, dim=1).sum(), label_batch.sum()))
-            logging.info("y_prob2: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), label_batch.sum()))
+
             iter_num += 1
+            
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
             # writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
