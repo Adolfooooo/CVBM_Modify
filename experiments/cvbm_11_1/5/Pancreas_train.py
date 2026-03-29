@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
 parser.add_argument('--exp', type=str, default='CVBM_Pancreas', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
-parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
+parser.add_argument('--pre_max_iteration', type=int, default=5000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
 parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
 parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
@@ -224,8 +224,6 @@ def pre_train(args, snapshot_path):
             volume_batch_strong, label_batch_strong = volume_batch_strong.cuda(), label_batch_strong.cuda()
             img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
             lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
-            lab_a_s_bg, lab_b_s_bg = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0
-            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[args.labeled_bs + sub_bs:]
             with torch.no_grad():
                 img_mask, loss_mask = context_mask_pancreas(img_a, args.mask_ratio)
 
@@ -242,13 +240,12 @@ def pre_train(args, snapshot_path):
             y2 = outputs_fg[:args.labeled_bs, ...]
             y_prob2 = F.softmax(y2, dim=1)
             loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-            loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
+            loss_seg_dice += DICE(y2, label_batch[:args.labeled_bs, ...] == 1)
 
             y_bg = outputs_bg[:args.labeled_bs, ...]
             y_prob_bg = F.softmax(y_bg, dim=1)
             loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch_strong[:args.labeled_bs, ...] == 0).long())
             loss_seg_dice += DICE(y_prob_bg, label_batch_strong[:args.labeled_bs, ...] == 0)
-
             loss = (loss_seg + loss_seg_dice) / 2
 
             iter_num += 1
@@ -257,17 +254,18 @@ def pre_train(args, snapshot_path):
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
             # writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
-            iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
-            writer.add_scalar('pre/loss_all', loss, iter_num)
-            logging.info("y_prob2: %s, label_batch: %s", torch.argmax(y_prob2, dim=1).sum(), label_batch.sum())
+            writer.add_scalar('pre/loss_all', loss, iter_num)            
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f', iter_num, loss, loss_seg_dice, loss_seg)
 
             if iter_num % 200 == 0:
+                if y_prob2.sum() == 0:
+                    logging.info("y_prob2 is all zero, skip evaluation to avoid NaN dice.")
+                    continue
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
                     model,
