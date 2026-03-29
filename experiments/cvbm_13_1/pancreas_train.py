@@ -224,8 +224,6 @@ def pre_train(args, snapshot_path):
             volume_batch_strong, label_batch_strong = volume_batch_strong.cuda(), label_batch_strong.cuda()
             img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
             lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
-            lab_a_s_bg, lab_b_s_bg = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0
-            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[args.labeled_bs + sub_bs:]
             with torch.no_grad():
                 img_mask, loss_mask = context_mask_pancreas(img_a, args.mask_ratio)
 
