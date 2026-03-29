@@ -22,7 +22,7 @@ import numpy as np
 from utils import losses, ramps, test_3d_patch
 from dataloaders.brats19.brats19_dataset import BRATSDataset
 from dataloaders.datasets_3d import WeakStrongAugment3d, TwoStreamBatchSampler
-from .modules import CVBMArgumentWithSKC3D
+from .modules import CVBMArgumentWithCrossSKC3D
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
@@ -281,13 +281,13 @@ def pre_train(args, snapshot_path):
 
 
 def self_train(args, pre_snapshot_path, self_snapshot_path):
-    model = CVBMArgumentWithSKC3D(
+    model = CVBMArgumentWithCrossSKC3D(
         n_channels=1,
         n_classes=args.num_classes,
         normalization='instancenorm',
         has_dropout=True,
     ).cuda()
-    ema_model = CVBMArgumentWithSKC3D(
+    ema_model = CVBMArgumentWithCrossSKC3D(
         n_channels=1,
         n_classes=args.num_classes,
         normalization='instancenorm',
