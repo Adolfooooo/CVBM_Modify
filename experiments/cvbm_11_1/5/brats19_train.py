@@ -237,24 +237,24 @@ def pre_train(args, snapshot_path):
             y2 = outputs_fg[:args.labeled_bs, ...]
             y_prob2 = F.softmax(y2, dim=1)
             loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-            loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
-
+            loss_seg_dice += DICE(y2, label_batch[:args.labeled_bs, ...] == 1)
             y_bg = outputs_bg[:args.labeled_bs, ...]
             y_prob_bg = F.softmax(y_bg, dim=1)
             loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch_strong[:args.labeled_bs, ...] == 0).long())
-            loss_seg_dice += DICE(y_prob_bg, label_batch_strong[:args.labeled_bs, ...] == 0)
+            loss_seg_dice += DICE(y_bg, label_batch_strong[:args.labeled_bs, ...] == 0)
 
             loss = (loss_seg + loss_seg_dice) / 2
 
-            iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
             logging.info("y_prob2: %s, label_batch: %s", torch.argmax(y_prob2, dim=1).sum(), label_batch.sum())
+            logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f', iter_num, loss, loss_seg_dice, loss_seg)
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f', iter_num, loss, loss_seg_dice, loss_seg)
+            iter_num += 1
 
             if iter_num % 200 == 0:
                 # snapshot_path = "{}/{}_{}_labeled/{}".format(args.snapshot_path, args.exp, args.labelnum, args.stage_name)

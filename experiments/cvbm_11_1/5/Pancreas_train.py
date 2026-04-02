@@ -32,8 +32,8 @@ parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_na
 parser.add_argument('--pre_max_iteration', type=int, default=5000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
 parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
-parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
-parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=6, help='batch_size of labeled data per gpu')
+parser.add_argument('--batch_size', type=int, default=12, help='batch_size per gpu')
 parser.add_argument('--patch_size', type=tuple, default=(96, 96, 96), help='patch_size of loading image')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
@@ -241,15 +241,19 @@ def pre_train(args, snapshot_path):
             y_prob2 = F.softmax(y2, dim=1)
             loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
             loss_seg_dice += DICE(y2, label_batch[:args.labeled_bs, ...] == 1)
-
+            # loss_seg += focal_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
+            # loss_seg_dice += binary_tversky_loss(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
             y_bg = outputs_bg[:args.labeled_bs, ...]
+            # loss_seg += focal_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            # loss_seg_dice += binary_tversky_loss(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
             y_prob_bg = F.softmax(y_bg, dim=1)
-            loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch_strong[:args.labeled_bs, ...] == 0).long())
-            loss_seg_dice += DICE(y_prob_bg, label_batch_strong[:args.labeled_bs, ...] == 0)
+            loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 0).long())
+            loss_seg_dice += DICE(y_bg, label_batch[:args.labeled_bs, ...] == 0)
+
             loss = (loss_seg + loss_seg_dice) / 2
 
-            iter_num += 1
-            
+            # logging.info("y_prob2: {}, y_prob_bg: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), torch.argmax(y_prob_bg, dim=1).sum(), label_batch.sum()))
+            logging.info("y_prob2: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), label_batch.sum()))
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
             # writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
@@ -260,6 +264,8 @@ def pre_train(args, snapshot_path):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            iter_num += 1
             logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f', iter_num, loss, loss_seg_dice, loss_seg)
 
             if iter_num % 200 == 0:
