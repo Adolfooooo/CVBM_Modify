@@ -272,12 +272,12 @@ def var_all_case_BTCV(model, num_classes, patch_size=(96, 96, 96), stride_xy=16,
 '''
 BRATS19 Dataset
 '''
-def var_all_case_BRATS19_argument(model, num_classes, patch_size=(96, 96, 96), stride_xy=18, stride_z=4, dataset_path=None):
+def var_all_case_BRATS19_argument(model, num_classes, patch_size=(96, 96, 96), stride_xy=18, stride_z=4, dataset_path=None, datafolder_name='/data/'):
     assert type(dataset_path) is str
 
     with open(dataset_path + '/test.list', 'r') as f:
         image_list = f.readlines()
-    image_list = [dataset_path + '/data/' + item.replace('\n', '') + ".h5" 
+    image_list = [dataset_path + datafolder_name + item.replace('\n', '') + ".h5" 
                   for item in image_list]
     loader = tqdm(image_list)
     total_dice = 0.0

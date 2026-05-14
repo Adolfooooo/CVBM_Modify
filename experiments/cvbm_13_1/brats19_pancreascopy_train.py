@@ -1,3 +1,4 @@
+import ast
 import sys
 import os
 import argparse
@@ -12,6 +13,7 @@ import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from dataloaders.brats19.brats19_dataset import BRATSDataset
 
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
@@ -34,7 +36,8 @@ parser.add_argument('--self_max_iteration', type=int, default=15000, help='maxim
 parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
 parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
 parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
-parser.add_argument('--patch_size', type=tuple, default=(96, 96, 96), help='patch_size of loading image')
+parser.add_argument('--patch_size', type=ast.literal_eval, default=(96, 96, 96), help='patch_size of loading image')
+parser.add_argument('--contrast_patch', type=ast.literal_eval, default=(8, 8, 8))
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=12, help='trained samples')
@@ -45,7 +48,6 @@ parser.add_argument('--consistency', type=float, default=1.0, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='10.0', help='magnitude')
 parser.add_argument('--topnum', type=int, default=32, help="negative sample contrast learning")
-parser.add_argument('--contrast_patch', type=tuple, default=(8,8,8))
 # -- setting of BANET
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of mask/image')
@@ -176,7 +178,7 @@ num_classes = 2
 
 def pre_train(args, snapshot_path):
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
-    db_train = Pancreas(
+    db_train = BRATSDataset(
         base_dir=train_data_path,
         split='train',
         transform=transforms.Compose([
@@ -266,13 +268,14 @@ def pre_train(args, snapshot_path):
 
             if iter_num % 200 == 0:
                 model.eval()
-                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
+                dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
                     model,
                     num_classes=num_classes,
                     patch_size=patch_size,
                     stride_xy=16,
                     stride_z=16,
-                    dataset_path=args.root_path)
+                    dataset_path=args.root_path,
+                )
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
                     save_mode_path = os.path.join(snapshot_path, f'iter_{iter_num}_dice_{best_dice}.pth')
@@ -307,7 +310,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     ).cuda()
     for param in ema_model.parameters():
         param.detach_()
-    db_train = Pancreas(
+    db_train = BRATSDataset(
         base_dir=train_data_path,
         split='train',
         transform=transforms.Compose([
@@ -427,14 +430,14 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             if iter_num % 200 == 0:
                 model.eval()
                 ema_model.eval()
-                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
+                dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
                     model,
                     num_classes=num_classes,
                     patch_size=patch_size,
                     stride_xy=16,
                     stride_z=16,
                     dataset_path=args.root_path)
-                ema_dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
+                ema_dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
                     ema_model,
                     num_classes=num_classes,
                     patch_size=patch_size,

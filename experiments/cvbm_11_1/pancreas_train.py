@@ -261,9 +261,7 @@ def pre_train(args, snapshot_path):
             iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
-            # writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
-            iter_num += 1
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
