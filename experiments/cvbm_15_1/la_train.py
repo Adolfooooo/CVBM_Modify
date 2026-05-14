@@ -46,6 +46,9 @@ parser.add_argument('--num_workers', type=int, default=8, help='cpu core num_wor
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='10.0', help='magnitude')
+parser.add_argument('--topnum', type=int, default=32, help="negative sample contrast learning")
+parser.add_argument('--contrast_patch', type=tuple, default=(8, 8, 8))
+parser.add_argument('--contrast_temperature', type=float, default=0.5, help='temperature for InfoNCE loss')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of mask/image')
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
@@ -165,6 +168,44 @@ def select_patches_for_contrast_3d(output_mix, topnum=16, patch_size=(4, 4, 4), 
     neg_patches = feat_patches[mask].view(B, num_neg, C)
 
     return pos_patches, neg_patches
+
+
+class BlockInfoNCELoss(nn.Module):
+    def __init__(self, temperature=0.5):
+        super(BlockInfoNCELoss, self).__init__()
+        if temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {temperature}")
+        self.temperature = temperature
+
+    def forward(self, pos_patches, neg_patches):
+        """
+        Multi-positive InfoNCE over selected low-confidence patches.
+
+        pos_patches: [B, K, C], each selected patch is an anchor and
+            the other selected patches in the same sample are positives.
+        neg_patches: [B, N, C], remaining patches are negatives.
+        """
+        pos_patches = F.normalize(pos_patches, p=2, dim=-1)
+        neg_patches = F.normalize(neg_patches, p=2, dim=-1)
+
+        _, num_pos, _ = pos_patches.shape
+        if num_pos < 2:
+            return pos_patches.mean() * 0.0
+
+        pos_logits = torch.bmm(pos_patches, pos_patches.transpose(1, 2)) / self.temperature
+        self_mask = torch.eye(num_pos, device=pos_patches.device, dtype=torch.bool).unsqueeze(0)
+        pos_logits = pos_logits.masked_fill(self_mask, float('-inf'))
+
+        neg_logits = torch.bmm(pos_patches, neg_patches.transpose(1, 2)) / self.temperature
+        denominator_logits = torch.cat([pos_logits, neg_logits], dim=-1)
+
+        log_pos = torch.logsumexp(pos_logits, dim=-1)
+        log_all = torch.logsumexp(denominator_logits, dim=-1)
+        valid = torch.isfinite(log_pos)
+        if not valid.any():
+            return pos_patches.mean() * 0.0
+
+        return -(log_pos[valid] - log_all[valid]).mean()
 
 
 train_data_path = args.root_path
@@ -341,8 +382,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
         persistent_workers=True
         )
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    consistency_criterion = losses.mse_loss
-    BCLLoss = losses.BlockContrastiveLoss()
+    BCLLoss = BlockInfoNCELoss(temperature=args.contrast_temperature)
 
     pretrained_model = os.path.join(pre_snapshot_path, f'{args.model}_best_model.pth')
     load_pretrained_backbone(model, pretrained_model)
@@ -407,7 +447,11 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
 
-            pos_patches, neg_patches = select_patches_for_contrast_3d(output_mix_bg_fg, topnum=440, patch_size=(4, 4, 20), choose_largest=False)
+            pos_patches, neg_patches = select_patches_for_contrast_3d(
+                output_mix_bg_fg,
+                topnum=args.topnum,
+                patch_size=args.contrast_patch,
+                choose_largest=False)
             bclloss = BCLLoss(pos_patches, neg_patches)
 
             loss = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * bclloss
