@@ -62,7 +62,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_11_1/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/1/', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
@@ -311,7 +311,7 @@ def pre_train(args, snapshot_path):
             optimizer.step()
             logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f', iter_num, loss, loss_seg_dice, loss_seg)
 
-            if iter_num % 200 == 0:
+            if iter_num % 200 == 0 and torch.argmax(y_prob2, dim=1).sum() != 0:
                 model.eval()
                 dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
                     model,
