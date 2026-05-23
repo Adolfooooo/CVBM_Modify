@@ -460,12 +460,12 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
 
-            pos_patches, neg_patches = select_patches_for_contrast_3d(
-                output_mix_bg_fg,
-                topnum=args.topnum,
-                patch_size=args.contrast_patch,
-                choose_largest=False)
-            bclloss = BCLLoss(pos_patches, neg_patches)
+            # pos_patches, neg_patches = select_patches_for_contrast_3d(
+            #     output_mix_bg_fg,
+            #     topnum=args.topnum,
+            #     patch_size=args.contrast_patch,
+            #     choose_largest=False)
+            # bclloss = BCLLoss(pos_patches, neg_patches)
 
             with torch.no_grad():
                 proto_labels_l_fg = lab_a * img_mask + plab_a_fg * (1 - img_mask)
@@ -474,18 +474,16 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 proto_labels_u_bg = plab_b_s_bg * img_mask + lab_b_s_bg * (1 - img_mask)
                 proto_labels_fg = torch.cat([proto_labels_l_fg, proto_labels_u_fg], dim=0).long()
                 proto_labels_bg = torch.cat([proto_labels_l_bg, proto_labels_u_bg], dim=0).long()
-                proto_conf_fg = torch.cat([
-                    torch.ones_like(lab_a, dtype=outputs_l.dtype),
-                    F.softmax(unoutput_a_fg, dim=1).max(dim=1).values,
-                    F.softmax(unoutput_b_fg, dim=1).max(dim=1).values,
-                    torch.ones_like(lab_b, dtype=outputs_u.dtype),
-                ], dim=0)
-                proto_conf_bg = torch.cat([
-                    torch.ones_like(lab_a_s_bg, dtype=outputs_l.dtype),
-                    F.softmax(unoutput_a_bg, dim=1).max(dim=1).values,
-                    F.softmax(unoutput_b_bg, dim=1).max(dim=1).values,
-                    torch.ones_like(lab_b_s_bg, dtype=outputs_u.dtype),
-                ], dim=0)
+                conf_a_fg = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
+                conf_b_fg = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
+                conf_a_bg = F.softmax(unoutput_a_bg, dim=1).max(dim=1).values
+                conf_b_bg = F.softmax(unoutput_b_bg, dim=1).max(dim=1).values
+                proto_conf_l_fg = torch.ones_like(lab_a, dtype=outputs_l.dtype) * img_mask + conf_a_fg * (1 - img_mask)
+                proto_conf_u_fg = conf_b_fg * img_mask + torch.ones_like(lab_b, dtype=outputs_u.dtype) * (1 - img_mask)
+                proto_conf_l_bg = torch.ones_like(lab_a_s_bg, dtype=outputs_l.dtype) * img_mask + conf_a_bg * (1 - img_mask)
+                proto_conf_u_bg = conf_b_bg * img_mask + torch.ones_like(lab_b_s_bg, dtype=outputs_u.dtype) * (1 - img_mask)
+                proto_conf_fg = torch.cat([proto_conf_l_fg, proto_conf_u_fg], dim=0)
+                proto_conf_bg = torch.cat([proto_conf_l_bg, proto_conf_u_bg], dim=0)
 
             proto_loss, proto_stats = proto_criterion(
                 feat_fg=torch.cat([feat_l_fg, feat_u_fg], dim=0),
@@ -496,7 +494,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 confidence_bg=proto_conf_bg,
             )
 
-            loss = loss_l + loss_u + loss_l_bg + loss_u_bg + consistency_weight * bclloss + args.proto_weight * proto_loss
+            loss = loss_l + loss_u + loss_l_bg + loss_u_bg + args.proto_weight * proto_loss
 
             iter_num += 1
             writer.add_scalar('Self/consistency', consistency_weight, iter_num)
@@ -504,7 +502,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             writer.add_scalar('Self/loss_u', loss_u, iter_num)
             writer.add_scalar('Self/loss_l_bg', loss_l_bg, iter_num)
             writer.add_scalar('Self/loss_u_bg', loss_u_bg, iter_num)
-            writer.add_scalar('Self/bclloss', bclloss, iter_num)
+            # writer.add_scalar('Self/bclloss', bclloss, iter_num)
             writer.add_scalar('Self/proto_loss', proto_loss, iter_num)
             writer.add_scalar('Self/proto_fg_queries', proto_stats["proto_fg_queries"], iter_num)
             writer.add_scalar('Self/proto_bg_queries', proto_stats["proto_bg_queries"], iter_num)
@@ -513,8 +511,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info('iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_bcl: %03f, loss_proto: %03f',
-                         iter_num, loss, loss_l, loss_u, bclloss, proto_loss)
+            logging.info('iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_proto: %03f',
+                         iter_num, loss, loss_l, loss_u, proto_loss)
 
             update_ema_variables(model, ema_model, 0.99)
 
