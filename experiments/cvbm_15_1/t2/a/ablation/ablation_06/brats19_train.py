@@ -22,15 +22,106 @@ import numpy as np
 from utils import losses, ramps, test_3d_patch
 from dataloaders.brats19.brats19_dataset import BRATSDataset
 from dataloaders.datasets_3d import WeakStrongAugment3d, TwoStreamBatchSampler
-from .modules import CVBMArgumentWithCrossSKC3DProto
-from .prototype_losses import BranchBatchPrototypeLoss
+from experiments.cvbm_15_1.t2.a.modules import CVBMArgumentWithCrossSKC3DProto
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
 
+class SingleBranchPrototypeLoss(nn.Module):
+    """Single-branch prototype contrast that keeps only the foreground branch."""
+
+    def __init__(
+        self,
+        in_channels,
+        proj_dim=32,
+        num_classes=2,
+        temperature=0.2,
+        confidence_threshold=0.8,
+        query_threshold=0.0,
+        patch_size=(8, 8, 8),
+        max_queries=4096,
+    ):
+        super().__init__()
+        if temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {temperature}")
+        self.num_classes = num_classes
+        self.temperature = temperature
+        self.confidence_threshold = confidence_threshold
+        self.query_threshold = query_threshold
+        self.patch_size = patch_size
+        self.max_queries = max_queries
+        self.projector = nn.Conv3d(in_channels, proj_dim, kernel_size=1, bias=False)
+
+    def forward(self, feat_fg, labels_fg, confidence_fg):
+        feat_fg, labels_fg, confidence_fg = self._pool_inputs(feat_fg, labels_fg, confidence_fg)
+        z_fg = F.normalize(self.projector(feat_fg), p=2, dim=1)
+
+        fg_loss, fg_count = self._branch_loss(z_fg, labels_fg, confidence_fg)
+        loss = z_fg.mean() * 0.0 if fg_count == 0 else fg_loss
+        stats = {
+            "proto_fg_queries": float(fg_count),
+            "proto_bg_queries": 0.0,
+        }
+        return loss, stats
+
+    def _pool_inputs(self, features, labels, confidence):
+        pooled_features = F.avg_pool3d(features, kernel_size=self.patch_size, stride=self.patch_size)
+        pooled_labels = F.avg_pool3d(
+            labels.float().unsqueeze(1),
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        ).squeeze(1)
+        pooled_confidence = F.avg_pool3d(
+            confidence.float().unsqueeze(1),
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        ).squeeze(1)
+        return pooled_features, (pooled_labels >= 0.5).long(), pooled_confidence
+
+    def _branch_loss(self, features, labels, confidence):
+        prototypes, valid_classes = self._build_batch_prototypes(features, labels, confidence)
+        if valid_classes.sum().item() < 2:
+            return features.mean() * 0.0, 0
+
+        flat_features = features.permute(0, 2, 3, 4, 1).reshape(-1, features.shape[1])
+        flat_labels = labels.reshape(-1).long()
+        flat_conf = confidence.reshape(-1)
+
+        query_mask = valid_classes[flat_labels] & (flat_conf >= self.query_threshold)
+        query_idx = query_mask.nonzero(as_tuple=False).squeeze(1)
+        if query_idx.numel() == 0:
+            return features.mean() * 0.0, 0
+        if self.max_queries > 0 and query_idx.numel() > self.max_queries:
+            perm = torch.randperm(query_idx.numel(), device=query_idx.device)[:self.max_queries]
+            query_idx = query_idx[perm]
+
+        queries = flat_features[query_idx]
+        targets = flat_labels[query_idx]
+        logits = torch.mm(queries, prototypes.t()) / self.temperature
+        logits[:, ~valid_classes] = -1e4
+        return F.cross_entropy(logits, targets), int(query_idx.numel())
+
+    def _build_batch_prototypes(self, features, labels, confidence):
+        channels = features.shape[1]
+        flat_features = features.permute(0, 2, 3, 4, 1).reshape(-1, channels)
+        flat_labels = labels.reshape(-1).long()
+        flat_conf = confidence.reshape(-1)
+
+        prototypes = features.new_zeros(self.num_classes, channels)
+        valid_classes = torch.zeros(self.num_classes, device=features.device, dtype=torch.bool)
+        for class_idx in range(self.num_classes):
+            class_mask = (flat_labels == class_idx) & (flat_conf >= self.confidence_threshold)
+            if class_mask.any():
+                prototypes[class_idx] = flat_features[class_mask].mean(dim=0)
+                valid_classes[class_idx] = True
+
+        prototypes = F.normalize(prototypes, p=2, dim=-1)
+        return prototypes, valid_classes
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/BRATS19', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_BRATS19', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_BRATS19_Ablation_06_SingleProtoBranch', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
@@ -63,7 +154,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/ablation_06/1/', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
@@ -307,7 +398,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
         pin_memory_device="cuda",
         persistent_workers=True,
     )
-    proto_criterion = BranchBatchPrototypeLoss(
+    proto_criterion = SingleBranchPrototypeLoss(
         in_channels=16,
         proj_dim=args.proto_dim,
         num_classes=num_classes,
@@ -388,28 +479,17 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             with torch.no_grad():
                 proto_labels_l_fg = lab_a * img_mask + plab_a_fg * (1 - img_mask)
                 proto_labels_u_fg = plab_b_fg * img_mask + lab_b * (1 - img_mask)
-                proto_labels_l_bg = lab_a_s_bg * img_mask + plab_a_s_bg * (1 - img_mask)
-                proto_labels_u_bg = plab_b_s_bg * img_mask + lab_b_s_bg * (1 - img_mask)
                 proto_labels_fg = torch.cat([proto_labels_l_fg, proto_labels_u_fg], dim=0).long()
-                proto_labels_bg = torch.cat([proto_labels_l_bg, proto_labels_u_bg], dim=0).long()
                 conf_a_fg = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
                 conf_b_fg = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
-                conf_a_bg = F.softmax(unoutput_a_bg, dim=1).max(dim=1).values
-                conf_b_bg = F.softmax(unoutput_b_bg, dim=1).max(dim=1).values
                 proto_conf_l_fg = torch.ones_like(lab_a, dtype=outputs_l.dtype) * img_mask + conf_a_fg * (1 - img_mask)
                 proto_conf_u_fg = conf_b_fg * img_mask + torch.ones_like(lab_b, dtype=outputs_u.dtype) * (1 - img_mask)
-                proto_conf_l_bg = torch.ones_like(lab_a_s_bg, dtype=outputs_l.dtype) * img_mask + conf_a_bg * (1 - img_mask)
-                proto_conf_u_bg = conf_b_bg * img_mask + torch.ones_like(lab_b_s_bg, dtype=outputs_u.dtype) * (1 - img_mask)
                 proto_conf_fg = torch.cat([proto_conf_l_fg, proto_conf_u_fg], dim=0)
-                proto_conf_bg = torch.cat([proto_conf_l_bg, proto_conf_u_bg], dim=0)
 
             proto_loss, proto_stats = proto_criterion(
                 feat_fg=torch.cat([feat_l_fg, feat_u_fg], dim=0),
-                feat_bg=torch.cat([feat_l_bg, feat_u_bg], dim=0),
                 labels_fg=proto_labels_fg,
-                labels_bg=proto_labels_bg,
                 confidence_fg=proto_conf_fg,
-                confidence_bg=proto_conf_bg,
             )
 
             loss = loss_l + loss_u + loss_l_bg + loss_u_bg + args.proto_weight * proto_loss
@@ -540,7 +620,7 @@ if __name__ == "__main__":
         args.proto_weight,
         args.proto_patch,
     )
-    print("Starting BRATS19 training with prototype SKC3D.")
+    print("Starting BRATS19 single-branch prototype ablation training.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)

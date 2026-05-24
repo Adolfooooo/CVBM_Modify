@@ -1,7 +1,6 @@
 import sys
 import os
 import argparse
-import ast
 import logging
 import shutil
 import random
@@ -22,22 +21,41 @@ import numpy as np
 from utils import losses, ramps, test_3d_patch
 from dataloaders.brats19.brats19_dataset import BRATSDataset
 from dataloaders.datasets_3d import WeakStrongAugment3d, TwoStreamBatchSampler
-from .modules import CVBMArgumentWithCrossSKC3DProto
-from .prototype_losses import BranchBatchPrototypeLoss
+from experiments.cvbm_15_1.t2.a.modules import CVBMArgumentWithCrossSKC3DProto
+from experiments.cvbm_15_1.t2.a.prototype_losses import BranchBatchPrototypeLoss
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
 
+def parse_3d_tuple(values):
+    if isinstance(values, tuple):
+        parsed = values
+    elif isinstance(values, list):
+        parsed = tuple(int(v) for v in values)
+    else:
+        text = str(values).strip().replace("(", "").replace(")", "").replace("[", "").replace("]", "")
+        parts = [item.strip() for item in text.split(",") if item.strip()]
+        if len(parts) == 1:
+            parts = text.split()
+        parsed = tuple(int(v) for v in parts if str(v).strip())
+
+    if len(parsed) != 3:
+        raise argparse.ArgumentTypeError(f"expected 3 integers, got {values}")
+    if any(v <= 0 for v in parsed):
+        raise argparse.ArgumentTypeError(f"all values must be > 0, got {values}")
+    return parsed
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/BRATS19', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_BRATS19', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_BRATS19_Ablation_ProtoPatch', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
 parser.add_argument('--max_samples', type=int, default=250, help='maximum samples to train')
 parser.add_argument('--labeled_bs', type=int, default=2, help='batch_size of labeled data per gpu')
 parser.add_argument('--batch_size', type=int, default=4, help='batch_size per gpu')
-parser.add_argument('--patch_size', type=ast.literal_eval, default=(96, 96, 96), help='patch_size of loading image')
+parser.add_argument('--patch_size', type=int, nargs=3, default=(96, 96, 96), help='patch_size of loading image')
 parser.add_argument('--num_classes', type=int, default=2, help="number of dataset's class")
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
@@ -53,7 +71,7 @@ parser.add_argument('--proto_dim', type=int, default=32, help='projection dimens
 parser.add_argument('--proto_temperature', type=float, default=0.2, help='temperature for prototype contrast')
 parser.add_argument('--proto_conf_threshold', type=float, default=0.8, help='confidence threshold for prototype construction')
 parser.add_argument('--proto_query_threshold', type=float, default=0.0, help='confidence threshold for prototype queries')
-parser.add_argument('--proto_patch', type=ast.literal_eval, default=(8, 8, 8), help='patch size for prototype pooling')
+parser.add_argument('--proto_patch', type=int, nargs=3, default=(8, 8, 8), help='patch size for prototype pooling')
 parser.add_argument('--proto_max_queries', type=int, default=4096, help='max patch queries per prototype branch')
 parser.add_argument('--train_num', type=int, default=1, help='the count of train')
 # -- setting of BANET
@@ -63,7 +81,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/ablation_04/1/', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
@@ -133,6 +151,9 @@ def get_current_consistency_weight(epoch):
 
 train_data_path = args.root_path
 
+args.patch_size = parse_3d_tuple(args.patch_size)
+args.proto_patch = parse_3d_tuple(args.proto_patch)
+
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 pre_max_iterations = args.pre_max_iteration
 self_max_iterations = args.self_max_iteration
@@ -149,6 +170,27 @@ if args.deterministic:
 
 patch_size = args.patch_size
 num_classes = args.num_classes
+
+
+def validate_proto_patch_settings(args):
+    feat_size = tuple(args.patch_size)
+    for axis_name, feat_dim, patch_dim in zip(("H", "W", "D"), feat_size, args.proto_patch):
+        if feat_dim % patch_dim != 0:
+            raise ValueError(
+                f"proto_patch {args.proto_patch} is incompatible with feature size {feat_size}: "
+                f"{axis_name}={feat_dim} is not divisible by {patch_dim}."
+            )
+
+    num_proto_patches = (
+        (feat_size[0] // args.proto_patch[0])
+        * (feat_size[1] // args.proto_patch[1])
+        * (feat_size[2] // args.proto_patch[2])
+    )
+    if num_proto_patches < 2:
+        raise ValueError(
+            f"proto_patch {args.proto_patch} yields only {num_proto_patches} pooled patch(es) on feature size {feat_size}; "
+            "at least 2 are required for prototype contrast."
+        )
 
 
 def pre_train(args, snapshot_path):
@@ -526,6 +568,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 
 if __name__ == "__main__":
+    validate_proto_patch_settings(args)
     pre_snapshot_path = "{}/{}/brats19/label{}/proto_w{}_patch{}/pre_train".format(
         args.snapshot_path,
         args.exp,
@@ -540,7 +583,7 @@ if __name__ == "__main__":
         args.proto_weight,
         args.proto_patch,
     )
-    print("Starting BRATS19 training with prototype SKC3D.")
+    print("Starting BRATS19 prototype patch-size ablation training with SKC3D.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)

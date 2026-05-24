@@ -22,21 +22,20 @@ import numpy as np
 from utils import losses, ramps, test_3d_patch
 from dataloaders.brats19.brats19_dataset import BRATSDataset
 from dataloaders.datasets_3d import WeakStrongAugment3d, TwoStreamBatchSampler
-from .modules import CVBMArgumentWithCrossSKC3DProto
-from .prototype_losses import BranchBatchPrototypeLoss
+from experiments.cvbm_15_1.t2.a.modules import CVBMArgumentWithCrossSKC3DProto
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/BRATS19', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_BRATS19', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_BRATS19_Ablation_Remove_Contrast_Keep_SKC', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
 parser.add_argument('--max_samples', type=int, default=250, help='maximum samples to train')
-parser.add_argument('--labeled_bs', type=int, default=2, help='batch_size of labeled data per gpu')
-parser.add_argument('--batch_size', type=int, default=4, help='batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
+parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
 parser.add_argument('--patch_size', type=ast.literal_eval, default=(96, 96, 96), help='patch_size of loading image')
 parser.add_argument('--num_classes', type=int, default=2, help="number of dataset's class")
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
@@ -48,13 +47,6 @@ parser.add_argument('--num_workers', type=int, default=8, help='cpu core num_wor
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='10.0', help='magnitude')
-parser.add_argument('--proto_weight', type=float, default=0.1, help='weight for branch prototype loss')
-parser.add_argument('--proto_dim', type=int, default=32, help='projection dimension for prototype loss')
-parser.add_argument('--proto_temperature', type=float, default=0.2, help='temperature for prototype contrast')
-parser.add_argument('--proto_conf_threshold', type=float, default=0.8, help='confidence threshold for prototype construction')
-parser.add_argument('--proto_query_threshold', type=float, default=0.0, help='confidence threshold for prototype queries')
-parser.add_argument('--proto_patch', type=ast.literal_eval, default=(8, 8, 8), help='patch size for prototype pooling')
-parser.add_argument('--proto_max_queries', type=int, default=4096, help='max patch queries per prototype branch')
 parser.add_argument('--train_num', type=int, default=1, help='the count of train')
 # -- setting of BANET
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
@@ -63,7 +55,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/ablation_03_remove_contrast_keep_skc/', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
@@ -307,18 +299,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
         pin_memory_device="cuda",
         persistent_workers=True,
     )
-    proto_criterion = BranchBatchPrototypeLoss(
-        in_channels=16,
-        proj_dim=args.proto_dim,
-        num_classes=num_classes,
-        temperature=args.proto_temperature,
-        confidence_threshold=args.proto_conf_threshold,
-        query_threshold=args.proto_query_threshold,
-        patch_size=args.proto_patch,
-        max_queries=args.proto_max_queries,
-    ).cuda()
     optimizer = optim.SGD(
-        list(model.parameters()) + list(proto_criterion.parameters()),
+        model.parameters(),
         lr=base_lr,
         momentum=0.9,
         weight_decay=0.0001,
@@ -375,8 +357,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             mixl_lab = lab_a * img_mask + plab_a * (1 - img_mask)
             mixu_lab = plab_b * img_mask + lab_b * (1 - img_mask)
 
-            outputs_l_fg, outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg, feat_l_fg, feat_l_bg = model(mixl_img, mixl_img_s)
-            outputs_u_fg, outputs_u, outputs_u_bg, sdm_outputs_u, sdm_outputs_u_bg, feat_u_fg, feat_u_bg = model(mixu_img, mixu_img_s)
+            outputs_l_fg, outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg, _, _ = model(mixl_img, mixl_img_s)
+            outputs_u_fg, outputs_u, outputs_u_bg, sdm_outputs_u, sdm_outputs_u_bg, _, _ = model(mixu_img, mixu_img_s)
 
             consistency_weight = get_current_consistency_weight(iter_num // 150)
 
@@ -385,34 +367,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
 
-            with torch.no_grad():
-                proto_labels_l_fg = lab_a * img_mask + plab_a_fg * (1 - img_mask)
-                proto_labels_u_fg = plab_b_fg * img_mask + lab_b * (1 - img_mask)
-                proto_labels_l_bg = lab_a_s_bg * img_mask + plab_a_s_bg * (1 - img_mask)
-                proto_labels_u_bg = plab_b_s_bg * img_mask + lab_b_s_bg * (1 - img_mask)
-                proto_labels_fg = torch.cat([proto_labels_l_fg, proto_labels_u_fg], dim=0).long()
-                proto_labels_bg = torch.cat([proto_labels_l_bg, proto_labels_u_bg], dim=0).long()
-                conf_a_fg = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
-                conf_b_fg = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
-                conf_a_bg = F.softmax(unoutput_a_bg, dim=1).max(dim=1).values
-                conf_b_bg = F.softmax(unoutput_b_bg, dim=1).max(dim=1).values
-                proto_conf_l_fg = torch.ones_like(lab_a, dtype=outputs_l.dtype) * img_mask + conf_a_fg * (1 - img_mask)
-                proto_conf_u_fg = conf_b_fg * img_mask + torch.ones_like(lab_b, dtype=outputs_u.dtype) * (1 - img_mask)
-                proto_conf_l_bg = torch.ones_like(lab_a_s_bg, dtype=outputs_l.dtype) * img_mask + conf_a_bg * (1 - img_mask)
-                proto_conf_u_bg = conf_b_bg * img_mask + torch.ones_like(lab_b_s_bg, dtype=outputs_u.dtype) * (1 - img_mask)
-                proto_conf_fg = torch.cat([proto_conf_l_fg, proto_conf_u_fg], dim=0)
-                proto_conf_bg = torch.cat([proto_conf_l_bg, proto_conf_u_bg], dim=0)
-
-            proto_loss, proto_stats = proto_criterion(
-                feat_fg=torch.cat([feat_l_fg, feat_u_fg], dim=0),
-                feat_bg=torch.cat([feat_l_bg, feat_u_bg], dim=0),
-                labels_fg=proto_labels_fg,
-                labels_bg=proto_labels_bg,
-                confidence_fg=proto_conf_fg,
-                confidence_bg=proto_conf_bg,
-            )
-
-            loss = loss_l + loss_u + loss_l_bg + loss_u_bg + args.proto_weight * proto_loss
+            loss = loss_l + loss_u + loss_l_bg + loss_u_bg
 
             iter_num += 1
             writer.add_scalar('Self/consistency', consistency_weight, iter_num)
@@ -420,16 +375,13 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             writer.add_scalar('Self/loss_u', loss_u, iter_num)
             writer.add_scalar('Self/loss_l_bg', loss_l_bg, iter_num)
             writer.add_scalar('Self/loss_u_bg', loss_u_bg, iter_num)
-            writer.add_scalar('Self/proto_loss', proto_loss, iter_num)
-            writer.add_scalar('Self/proto_fg_queries', proto_stats["proto_fg_queries"], iter_num)
-            writer.add_scalar('Self/proto_bg_queries', proto_stats["proto_bg_queries"], iter_num)
             writer.add_scalar('Self/loss_all', loss, iter_num)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info('iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_proto: %03f',
-                         iter_num, loss, loss_l, loss_u, proto_loss)
+            logging.info('iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f',
+                         iter_num, loss, loss_l, loss_u)
 
             update_ema_variables(model, ema_model, 0.99)
 
@@ -526,21 +478,19 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 
 if __name__ == "__main__":
-    pre_snapshot_path = "{}/{}/brats19/label{}/proto_w{}_patch{}/pre_train".format(
+    pre_snapshot_path = "{}/{}/brats19/label{}/{}/pre_train".format(
         args.snapshot_path,
         args.exp,
         args.labelnum,
-        args.proto_weight,
-        args.proto_patch,
+        args.train_num,
     )
-    self_snapshot_path = "{}/{}/brats19/label{}/proto_w{}_patch{}/self_train".format(
+    self_snapshot_path = "{}/{}/brats19/label{}/{}/self_train".format(
         args.snapshot_path,
         args.exp,
         args.labelnum,
-        args.proto_weight,
-        args.proto_patch,
+        args.train_num,
     )
-    print("Starting BRATS19 training with prototype SKC3D.")
+    print("Starting BRATS19 training with SKC3D and without prototype contrast.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)

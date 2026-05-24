@@ -1,7 +1,6 @@
 import sys
 import os
 import argparse
-import ast
 import logging
 import shutil
 import random
@@ -20,42 +19,42 @@ from skimage.measure import label
 import numpy as np
 
 from utils import losses, ramps, test_3d_patch
-from dataloaders.brats19.brats19_dataset import BRATSDataset
-from dataloaders.datasets_3d import WeakStrongAugment3d, TwoStreamBatchSampler
-from .modules import CVBMArgumentWithCrossSKC3DProto
-from .prototype_losses import BranchBatchPrototypeLoss
+from dataloaders.datasets_3d import WeakStrongAugment3d, Pancreas, TwoStreamBatchSampler
+from experiments.cvbm_15_1.t2.a.modules import CVBMArgumentWithCrossSKC3DProto
+from experiments.cvbm_15_1.t2.a.prototype_losses import BranchBatchPrototypeLoss
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/BRATS19', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_BRATS19', help='exp_name')
+parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
+parser.add_argument('--exp', type=str, default='CVBM_Pancreas', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
-parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
+parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
-parser.add_argument('--max_samples', type=int, default=250, help='maximum samples to train')
-parser.add_argument('--labeled_bs', type=int, default=2, help='batch_size of labeled data per gpu')
-parser.add_argument('--batch_size', type=int, default=4, help='batch_size per gpu')
-parser.add_argument('--patch_size', type=ast.literal_eval, default=(96, 96, 96), help='patch_size of loading image')
-parser.add_argument('--num_classes', type=int, default=2, help="number of dataset's class")
+parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
+parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
+parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
+parser.add_argument('--patch_size', type=tuple, default=(96, 96, 96), help='patch_size of loading image')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
-parser.add_argument('--labelnum', type=int, default=25, help='trained samples')
+parser.add_argument('--labelnum', type=int, default=12, help='trained samples')
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_workers', type=int, default=8, help='cpu core num_workers')
 parser.add_argument('--consistency', type=float, default=1.0, help='consistency')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='10.0', help='magnitude')
+parser.add_argument('--topnum', type=int, default=32, help="negative sample contrast learning")
+parser.add_argument('--contrast_patch', type=tuple, default=(8,8,8))
+parser.add_argument('--contrast_temperature', type=float, default=0.5, help='temperature for InfoNCE loss')
 parser.add_argument('--proto_weight', type=float, default=0.1, help='weight for branch prototype loss')
 parser.add_argument('--proto_dim', type=int, default=32, help='projection dimension for prototype loss')
 parser.add_argument('--proto_temperature', type=float, default=0.2, help='temperature for prototype contrast')
 parser.add_argument('--proto_conf_threshold', type=float, default=0.8, help='confidence threshold for prototype construction')
 parser.add_argument('--proto_query_threshold', type=float, default=0.0, help='confidence threshold for prototype queries')
-parser.add_argument('--proto_patch', type=ast.literal_eval, default=(8, 8, 8), help='patch size for prototype pooling')
+parser.add_argument('--proto_patch', type=tuple, default=(8, 8, 8), help='patch size for prototype pooling')
 parser.add_argument('--proto_max_queries', type=int, default=4096, help='max patch queries per prototype branch')
-parser.add_argument('--train_num', type=int, default=1, help='the count of train')
 # -- setting of BANET
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of mask/image')
@@ -63,7 +62,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/ablation_05/1/', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
@@ -131,6 +130,77 @@ def get_current_consistency_weight(epoch):
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
 
+def select_patches_for_contrast_3d(output_mix, topnum=16, patch_size=(4, 4, 4), choose_largest=False):
+    """
+    output_mix: [B, C, H, W, D] (e.g. 3D segmentation logits)
+    返回:
+      pos_patches: [B, topnum, C]
+      neg_patches: [B, L-topnum, C]
+    """
+    B, C, H, W, D = output_mix.shape
+    ph, pw, pd = patch_size
+    assert H % ph == 0 and W % pw == 0 and D % pd == 0, "H/W/D 必须能被 patch_size 整除"
+
+    probs = F.softmax(output_mix, dim=1)
+    score = probs.max(dim=1, keepdim=True).values
+
+    patch_conf = F.avg_pool3d(score, kernel_size=(ph, pw, pd), stride=(ph, pw, pd))
+    patch_conf = patch_conf.flatten(1)
+
+    _, top_idx = patch_conf.topk(topnum, dim=1, largest=choose_largest)
+    B_, L = patch_conf.shape
+    all_idx = torch.arange(L, device=output_mix.device).unsqueeze(0).expand(B_, -1)
+    mask = torch.ones_like(all_idx, dtype=torch.bool)
+    mask.scatter_(1, top_idx, False)
+    num_neg = L - topnum
+
+    feat_patches = F.avg_pool3d(probs, kernel_size=(ph, pw, pd), stride=(ph, pw, pd))
+    feat_patches = feat_patches.flatten(2).permute(0, 2, 1).contiguous()
+
+    pos_patches = torch.gather(feat_patches, dim=1, index=top_idx.unsqueeze(-1).expand(-1, -1, C))
+    neg_patches = feat_patches[mask].view(B, num_neg, C)
+
+    return pos_patches, neg_patches
+
+
+class BlockInfoNCELoss(nn.Module):
+    def __init__(self, temperature=0.5):
+        super(BlockInfoNCELoss, self).__init__()
+        if temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {temperature}")
+        self.temperature = temperature
+
+    def forward(self, pos_patches, neg_patches):
+        """
+        Multi-positive InfoNCE over selected low-confidence patches.
+
+        pos_patches: [B, K, C], each selected patch is an anchor and
+            the other selected patches in the same sample are positives.
+        neg_patches: [B, N, C], remaining patches are negatives.
+        """
+        pos_patches = F.normalize(pos_patches, p=2, dim=-1)
+        neg_patches = F.normalize(neg_patches, p=2, dim=-1)
+
+        _, num_pos, _ = pos_patches.shape
+        if num_pos < 2:
+            return pos_patches.mean() * 0.0
+
+        pos_logits = torch.bmm(pos_patches, pos_patches.transpose(1, 2)) / self.temperature
+        self_mask = torch.eye(num_pos, device=pos_patches.device, dtype=torch.bool).unsqueeze(0)
+        pos_logits = pos_logits.masked_fill(self_mask, float('-inf'))
+
+        neg_logits = torch.bmm(pos_patches, neg_patches.transpose(1, 2)) / self.temperature
+        denominator_logits = torch.cat([pos_logits, neg_logits], dim=-1)
+
+        log_pos = torch.logsumexp(pos_logits, dim=-1)
+        log_all = torch.logsumexp(denominator_logits, dim=-1)
+        valid = torch.isfinite(log_pos)
+        if not valid.any():
+            return pos_patches.mean() * 0.0
+
+        return -(log_pos[valid] - log_all[valid]).mean()
+
+
 train_data_path = args.root_path
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -148,20 +218,20 @@ if args.deterministic:
     np.random.seed(args.seed)
 
 patch_size = args.patch_size
-num_classes = args.num_classes
+num_classes = 2
 
 
 def pre_train(args, snapshot_path):
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
-    db_train = BRATSDataset(
+    db_train = Pancreas(
         base_dir=train_data_path,
         split='train',
         transform=transforms.Compose([
-            WeakStrongAugment3d(args.patch_size, flag_rot=False)
+            WeakStrongAugment3d(args.patch_size, flag_rot=True)
         ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
-    unlabeled_idxs = list(range(labelnum, len(db_train)))
+    unlabeled_idxs = list(range(labelnum, args.max_samples))
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
                                           args.batch_size - args.labeled_bs)
     sub_bs = int(args.labeled_bs / 2)
@@ -179,7 +249,9 @@ def pre_train(args, snapshot_path):
         persistent_workers=True,
     )
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    DICE = losses.mask_DiceLoss(nclass=num_classes)
+    DICE = losses.mask_DiceLoss(nclass=2)
+    focal_loss = losses.FocalLoss(alpha=2.0, gamma=2.0)
+    binary_tversky_loss = losses.BinaryTverskyLoss3D(alpha=0.7, beta=0.3)
 
     writer = SummaryWriter(snapshot_path + '/log')
     logging.info("%d itertations per epoch", len(trainloader))
@@ -241,12 +313,12 @@ def pre_train(args, snapshot_path):
 
             if iter_num % 200 == 0 and torch.argmax(y_prob2, dim=1).sum() != 0:
                 model.eval()
-                dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
+                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
                     model,
                     num_classes=num_classes,
                     patch_size=patch_size,
-                    stride_xy=64,
-                    stride_z=64,
+                    stride_xy=16,
+                    stride_z=16,
                     dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
@@ -282,15 +354,15 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     ).cuda()
     for param in ema_model.parameters():
         param.detach_()
-    db_train = BRATSDataset(
+    db_train = Pancreas(
         base_dir=train_data_path,
         split='train',
         transform=transforms.Compose([
-            WeakStrongAugment3d(args.patch_size, flag_rot=False)
+            WeakStrongAugment3d(args.patch_size, flag_rot=True)
         ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
-    unlabeled_idxs = list(range(labelnum, len(db_train)))
+    unlabeled_idxs = list(range(labelnum, args.max_samples))
     batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size,
                                           args.batch_size - args.labeled_bs)
     sub_bs = int(args.labeled_bs / 2)
@@ -307,6 +379,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
         pin_memory_device="cuda",
         persistent_workers=True,
     )
+    BCLLoss = BlockInfoNCELoss(temperature=args.contrast_temperature)
     proto_criterion = BranchBatchPrototypeLoss(
         in_channels=16,
         proj_dim=args.proto_dim,
@@ -378,12 +451,21 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             outputs_l_fg, outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg, feat_l_fg, feat_l_bg = model(mixl_img, mixl_img_s)
             outputs_u_fg, outputs_u, outputs_u_bg, sdm_outputs_u, sdm_outputs_u_bg, feat_u_fg, feat_u_bg = model(mixu_img, mixu_img_s)
 
+            output_mix_bg_fg = torch.cat([outputs_l, outputs_u], dim=0)
+
             consistency_weight = get_current_consistency_weight(iter_num // 150)
 
             loss_l = mix_loss(outputs_l_fg, lab_a, plab_a_fg, loss_mask, u_weight=args.u_weight)
             loss_u = mix_loss(outputs_u_fg, plab_b_fg, lab_b, loss_mask, u_weight=args.u_weight, unlab=True)
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
+
+            # pos_patches, neg_patches = select_patches_for_contrast_3d(
+            #     output_mix_bg_fg,
+            #     topnum=args.topnum,
+            #     patch_size=args.contrast_patch,
+            #     choose_largest=False)
+            # bclloss = BCLLoss(pos_patches, neg_patches)
 
             with torch.no_grad():
                 proto_labels_l_fg = lab_a * img_mask + plab_a_fg * (1 - img_mask)
@@ -420,6 +502,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             writer.add_scalar('Self/loss_u', loss_u, iter_num)
             writer.add_scalar('Self/loss_l_bg', loss_l_bg, iter_num)
             writer.add_scalar('Self/loss_u_bg', loss_u_bg, iter_num)
+            # writer.add_scalar('Self/bclloss', bclloss, iter_num)
             writer.add_scalar('Self/proto_loss', proto_loss, iter_num)
             writer.add_scalar('Self/proto_fg_queries', proto_stats["proto_fg_queries"], iter_num)
             writer.add_scalar('Self/proto_bg_queries', proto_stats["proto_bg_queries"], iter_num)
@@ -436,19 +519,19 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             if iter_num % 200 == 0:
                 model.eval()
                 ema_model.eval()
-                dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
+                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
                     model,
                     num_classes=num_classes,
                     patch_size=patch_size,
-                    stride_xy=64,
-                    stride_z=64,
+                    stride_xy=16,
+                    stride_z=16,
                     dataset_path=args.root_path)
-                ema_dice_sample = test_3d_patch.var_all_case_BRATS19_argument(
+                ema_dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
                     ema_model,
                     num_classes=num_classes,
                     patch_size=patch_size,
-                    stride_xy=64,
-                    stride_z=64,
+                    stride_xy=16,
+                    stride_z=16,
                     dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
@@ -526,21 +609,9 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 
 
 if __name__ == "__main__":
-    pre_snapshot_path = "{}/{}/brats19/label{}/proto_w{}_patch{}/pre_train".format(
-        args.snapshot_path,
-        args.exp,
-        args.labelnum,
-        args.proto_weight,
-        args.proto_patch,
-    )
-    self_snapshot_path = "{}/{}/brats19/label{}/proto_w{}_patch{}/self_train".format(
-        args.snapshot_path,
-        args.exp,
-        args.labelnum,
-        args.proto_weight,
-        args.proto_patch,
-    )
-    print("Starting BRATS19 training with prototype SKC3D.")
+    pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
+    self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
+    print("Starting Pancreas training with SKC3D.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)

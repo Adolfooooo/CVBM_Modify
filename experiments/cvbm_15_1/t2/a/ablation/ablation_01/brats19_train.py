@@ -22,15 +22,15 @@ import numpy as np
 from utils import losses, ramps, test_3d_patch
 from dataloaders.brats19.brats19_dataset import BRATSDataset
 from dataloaders.datasets_3d import WeakStrongAugment3d, TwoStreamBatchSampler
-from .modules import CVBMArgumentWithCrossSKC3DProto
-from .prototype_losses import BranchBatchPrototypeLoss
+from networks.CVBM import Decoder, Encoder
+from ...prototype_losses import BranchBatchPrototypeLoss
 from networks.net_factory import net_factory
 from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/BRATS19', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_BRATS19', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_BRATS19_Ablation_Without_SKC', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
@@ -63,9 +63,96 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/1/', help='snapshot path to save model')
+parser.add_argument(
+    '--snapshot_path',
+    type=str,
+    default='./results/CVBM_15_1_t2_a/ablation_01/',
+    help='snapshot path to save model',
+)
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
+
+
+class DecoderWithFeature(Decoder):
+    def forward(self, features):
+        x1, x2, x3, x4, x5 = features
+
+        x5_up = self.block_five_up(x5)
+        x5_up = x5_up + x4
+
+        x6 = self.block_six(x5_up)
+        x6_up = self.block_six_up(x6)
+        x6_up = x6_up + x3
+
+        x7 = self.block_seven(x6_up)
+        x7_up = self.block_seven_up(x7)
+        x7_up = x7_up + x2
+
+        x8 = self.block_eight(x7_up)
+        x8_up = self.block_eight_up(x8)
+        x8_up = x8_up + x1
+
+        x9 = self.block_nine(x8_up)
+        out_seg2 = self.out_conv2(x9)
+        out_tanh = self.tanh(out_seg2)
+        proto_feature = x9
+        if self.has_dropout:
+            x9 = self.dropout(x9)
+        out_seg = self.out_conv(x9)
+
+        return out_seg, out_tanh, proto_feature
+
+
+class CVBMArgumentWithoutSKC3DProto(nn.Module):
+    """Dual-branch CVBM prototype model without semantic interaction."""
+
+    def __init__(
+        self,
+        n_channels: int = 1,
+        n_classes: int = 2,
+        n_filters: int = 16,
+        normalization: str = "instancenorm",
+        has_dropout: bool = False,
+        has_residual: bool = False,
+    ) -> None:
+        super().__init__()
+        self.encoder = Encoder(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+        )
+        self.decoder_fg = DecoderWithFeature(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+            up_type=0,
+        )
+        self.decoder_bg = DecoderWithFeature(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+            up_type=2,
+        )
+        self.final_seg = nn.Conv3d(n_classes * 2, n_classes, kernel_size=1)
+
+    def forward(self, input_fg, input_bg):
+        fg_feats = list(self.encoder(input_fg))
+        bg_feats = list(self.encoder(input_bg))
+
+        out_fg, attn_fg, feat_fg = self.decoder_fg(fg_feats)
+        out_bg, attn_bg, feat_bg = self.decoder_bg(bg_feats)
+
+        fused_logits = self.final_seg(torch.cat([out_fg, out_bg], dim=1))
+        return out_fg, fused_logits, out_bg, attn_fg, attn_bg, feat_fg, feat_bg
 
 
 def get_cut_mask(out, thres=0.5, nms=0):
@@ -114,7 +201,7 @@ def load_net(net, path):
 def load_pretrained_backbone(model, ckpt_path):
     """
     Loads encoder/decoder weights from a vanilla CVBM_Argument checkpoint into
-    the SKC-augmented backbone.
+    the dual-branch prototype model without SKC.
     """
     state = torch.load(str(ckpt_path))
     state_dict = state['net'] if 'net' in state else state
@@ -268,13 +355,13 @@ def pre_train(args, snapshot_path):
 
 
 def self_train(args, pre_snapshot_path, self_snapshot_path):
-    model = CVBMArgumentWithCrossSKC3DProto(
+    model = CVBMArgumentWithoutSKC3DProto(
         n_channels=1,
         n_classes=num_classes,
         normalization='instancenorm',
         has_dropout=True,
     ).cuda()
-    ema_model = CVBMArgumentWithCrossSKC3DProto(
+    ema_model = CVBMArgumentWithoutSKC3DProto(
         n_channels=1,
         n_classes=num_classes,
         normalization='instancenorm',
@@ -540,7 +627,7 @@ if __name__ == "__main__":
         args.proto_weight,
         args.proto_patch,
     )
-    print("Starting BRATS19 training with prototype SKC3D.")
+    print("Starting BRATS19 ablation training without SKC and with prototype contrast only.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
