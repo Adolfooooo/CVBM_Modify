@@ -29,11 +29,12 @@ from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
 
 
 class SingleBranchPrototypeLoss(nn.Module):
-    """Single-branch prototype contrast that keeps only the foreground branch."""
+    """Single-branch prototype contrast for either foreground or background."""
 
     def __init__(
         self,
         in_channels,
+        branch="fg",
         proj_dim=32,
         num_classes=2,
         temperature=0.2,
@@ -43,8 +44,11 @@ class SingleBranchPrototypeLoss(nn.Module):
         max_queries=4096,
     ):
         super().__init__()
+        if branch not in ("fg", "bg"):
+            raise ValueError(f"branch must be 'fg' or 'bg', got {branch}")
         if temperature <= 0:
             raise ValueError(f"temperature must be > 0, got {temperature}")
+        self.branch = branch
         self.num_classes = num_classes
         self.temperature = temperature
         self.confidence_threshold = confidence_threshold
@@ -53,15 +57,15 @@ class SingleBranchPrototypeLoss(nn.Module):
         self.max_queries = max_queries
         self.projector = nn.Conv3d(in_channels, proj_dim, kernel_size=1, bias=False)
 
-    def forward(self, feat_fg, labels_fg, confidence_fg):
-        feat_fg, labels_fg, confidence_fg = self._pool_inputs(feat_fg, labels_fg, confidence_fg)
-        z_fg = F.normalize(self.projector(feat_fg), p=2, dim=1)
+    def forward(self, features, labels, confidence):
+        features, labels, confidence = self._pool_inputs(features, labels, confidence)
+        z = F.normalize(self.projector(features), p=2, dim=1)
 
-        fg_loss, fg_count = self._branch_loss(z_fg, labels_fg, confidence_fg)
-        loss = z_fg.mean() * 0.0 if fg_count == 0 else fg_loss
+        branch_loss, branch_count = self._branch_loss(z, labels, confidence)
+        loss = z.mean() * 0.0 if branch_count == 0 else branch_loss
         stats = {
-            "proto_fg_queries": float(fg_count),
-            "proto_bg_queries": 0.0,
+            "proto_fg_queries": float(branch_count) if self.branch == "fg" else 0.0,
+            "proto_bg_queries": float(branch_count) if self.branch == "bg" else 0.0,
         }
         return loss, stats
 
@@ -149,6 +153,8 @@ parser.add_argument('--proto_conf_threshold', type=float, default=0.8, help='con
 parser.add_argument('--proto_query_threshold', type=float, default=0.0, help='confidence threshold for prototype queries')
 parser.add_argument('--proto_patch', type=tuple, default=(8, 8, 8), help='patch size for prototype pooling')
 parser.add_argument('--proto_max_queries', type=int, default=4096, help='max patch queries per prototype branch')
+parser.add_argument('--proto_branch', type=str, default='fg', choices=['fg', 'bg'],
+                    help='single prototype contrast branch to keep')
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of mask/image')
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
@@ -484,6 +490,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     BCLLoss = BlockInfoNCELoss(temperature=args.contrast_temperature)
     proto_criterion = SingleBranchPrototypeLoss(
         in_channels=16,
+        branch=args.proto_branch,
         proj_dim=args.proto_dim,
         num_classes=num_classes,
         temperature=args.proto_temperature,
@@ -570,20 +577,32 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             # bclloss = BCLLoss(pos_patches, neg_patches)
 
             with torch.no_grad():
-                proto_labels_l_fg = lab_a * img_mask + plab_a_fg * (1 - img_mask)
-                proto_labels_u_fg = plab_b_fg * img_mask + lab_b * (1 - img_mask)
-                proto_labels_fg = torch.cat([proto_labels_l_fg, proto_labels_u_fg], dim=0).long()
+                if args.proto_branch == "fg":
+                    proto_labels_l = lab_a * img_mask + plab_a_fg * (1 - img_mask)
+                    proto_labels_u = plab_b_fg * img_mask + lab_b * (1 - img_mask)
+                    conf_a = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
+                    conf_b = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
+                    proto_conf_l = torch.ones_like(lab_a, dtype=outputs_l.dtype) * img_mask + conf_a * (1 - img_mask)
+                    proto_conf_u = conf_b * img_mask + torch.ones_like(lab_b, dtype=outputs_u.dtype) * (1 - img_mask)
+                else:
+                    proto_labels_l = lab_a_s_bg * img_mask + plab_a_s_bg * (1 - img_mask)
+                    proto_labels_u = plab_b_s_bg * img_mask + lab_b_s_bg * (1 - img_mask)
+                    conf_a = F.softmax(unoutput_a_bg, dim=1).max(dim=1).values
+                    conf_b = F.softmax(unoutput_b_bg, dim=1).max(dim=1).values
+                    proto_conf_l = torch.ones_like(lab_a_s_bg, dtype=outputs_l.dtype) * img_mask + conf_a * (1 - img_mask)
+                    proto_conf_u = conf_b * img_mask + torch.ones_like(lab_b_s_bg, dtype=outputs_u.dtype) * (1 - img_mask)
 
-                conf_a_fg = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
-                conf_b_fg = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
-                proto_conf_l_fg = torch.ones_like(lab_a, dtype=outputs_l.dtype) * img_mask + conf_a_fg * (1 - img_mask)
-                proto_conf_u_fg = conf_b_fg * img_mask + torch.ones_like(lab_b, dtype=outputs_u.dtype) * (1 - img_mask)
-                proto_conf_fg = torch.cat([proto_conf_l_fg, proto_conf_u_fg], dim=0)
+                proto_labels = torch.cat([proto_labels_l, proto_labels_u], dim=0).long()
+                proto_conf = torch.cat([proto_conf_l, proto_conf_u], dim=0)
+
+            proto_features = torch.cat([feat_l_fg, feat_u_fg], dim=0)
+            if args.proto_branch == "bg":
+                proto_features = torch.cat([feat_l_bg, feat_u_bg], dim=0)
 
             proto_loss, proto_stats = proto_criterion(
-                feat_fg=torch.cat([feat_l_fg, feat_u_fg], dim=0),
-                labels_fg=proto_labels_fg,
-                confidence_fg=proto_conf_fg,
+                features=proto_features,
+                labels=proto_labels,
+                confidence=proto_conf,
             )
 
             loss = loss_l + loss_u + loss_l_bg + loss_u_bg  + args.proto_weight * proto_loss
