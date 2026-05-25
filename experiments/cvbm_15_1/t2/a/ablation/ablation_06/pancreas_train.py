@@ -3,6 +3,7 @@ import os
 import random
 import shutil
 import sys
+import argparse
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +14,12 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from dataloaders.datasets_3d import Pancreas, TwoStreamBatchSampler, WeakStrongAugment3d
+
+proto_branch_parser = argparse.ArgumentParser(add_help=False)
+proto_branch_parser.add_argument("--proto_branch", type=str, default="fg", choices=["fg", "bg"])
+proto_branch_args, remaining_argv = proto_branch_parser.parse_known_args()
+sys.argv = [sys.argv[0]] + remaining_argv
+
 from experiments.cvbm_15_1.t2.a import pancreas_train as pancreas_base
 from networks.net_factory import net_factory
 from utils import losses, test_3d_patch
@@ -20,11 +27,12 @@ from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variable
 
 
 class SingleBranchPrototypeLoss(torch.nn.Module):
-    """Single-branch prototype contrast that keeps only the foreground branch."""
+    """Single-branch prototype contrast for either foreground or background."""
 
     def __init__(
         self,
         in_channels,
+        branch="fg",
         proj_dim=32,
         num_classes=2,
         temperature=0.2,
@@ -34,8 +42,11 @@ class SingleBranchPrototypeLoss(torch.nn.Module):
         max_queries=4096,
     ):
         super().__init__()
+        if branch not in ("fg", "bg"):
+            raise ValueError(f"branch must be 'fg' or 'bg', got {branch}")
         if temperature <= 0:
             raise ValueError(f"temperature must be > 0, got {temperature}")
+        self.branch = branch
         self.num_classes = num_classes
         self.temperature = temperature
         self.confidence_threshold = confidence_threshold
@@ -44,19 +55,19 @@ class SingleBranchPrototypeLoss(torch.nn.Module):
         self.max_queries = max_queries
         self.projector = torch.nn.Conv3d(in_channels, proj_dim, kernel_size=1, bias=False)
 
-    def forward(self, feat_fg, labels_fg, confidence_fg):
-        feat_fg, labels_fg, confidence_fg = self._pool_inputs(feat_fg, labels_fg, confidence_fg)
-        z_fg = F.normalize(self.projector(feat_fg), p=2, dim=1)
+    def forward(self, features, labels, confidence):
+        features, labels, confidence = self._pool_inputs(features, labels, confidence)
+        z = F.normalize(self.projector(features), p=2, dim=1)
 
-        fg_loss, fg_count = self._branch_loss(z_fg, labels_fg, confidence_fg)
-        if fg_count == 0:
-            loss = z_fg.mean() * 0.0
+        branch_loss, branch_count = self._branch_loss(z, labels, confidence)
+        if branch_count == 0:
+            loss = z.mean() * 0.0
         else:
-            loss = fg_loss
+            loss = branch_loss
 
         stats = {
-            "proto_fg_queries": float(fg_count),
-            "proto_bg_queries": 0.0,
+            "proto_fg_queries": float(branch_count) if self.branch == "fg" else 0.0,
+            "proto_bg_queries": float(branch_count) if self.branch == "bg" else 0.0,
         }
         return loss, stats
 
@@ -116,6 +127,7 @@ class SingleBranchPrototypeLoss(torch.nn.Module):
 
 
 args = pancreas_base.args
+args.proto_branch = proto_branch_args.proto_branch
 if args.exp == "CVBM_Pancreas":
     args.exp = "CVBM_Pancreas_Ablation_06_SingleProtoBranch"
 if args.snapshot_path == "./results/CVBM_15_1_t2_a/1/":
@@ -297,6 +309,7 @@ def self_train(local_args, pre_snapshot_path, self_snapshot_path):
     )
     proto_criterion = SingleBranchPrototypeLoss(
         in_channels=16,
+        branch=local_args.proto_branch,
         proj_dim=local_args.proto_dim,
         num_classes=num_classes,
         temperature=local_args.proto_temperature,
@@ -365,8 +378,8 @@ def self_train(local_args, pre_snapshot_path, self_snapshot_path):
             mixl_lab = lab_a * img_mask + plab_a * (1 - img_mask)
             mixu_lab = plab_b * img_mask + lab_b * (1 - img_mask)
 
-            outputs_l_fg, outputs_l, outputs_l_bg, _, _, feat_l_fg, _ = model(mixl_img, mixl_img_s)
-            outputs_u_fg, outputs_u, outputs_u_bg, _, _, feat_u_fg, _ = model(mixu_img, mixu_img_s)
+            outputs_l_fg, outputs_l, outputs_l_bg, _, _, feat_l_fg, feat_l_bg = model(mixl_img, mixl_img_s)
+            outputs_u_fg, outputs_u, outputs_u_bg, _, _, feat_u_fg, feat_u_bg = model(mixu_img, mixu_img_s)
 
             consistency_weight = pancreas_base.get_current_consistency_weight(iter_num // 150)
 
@@ -376,19 +389,32 @@ def self_train(local_args, pre_snapshot_path, self_snapshot_path):
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=local_args.u_weight, unlab=True)
 
             with torch.no_grad():
-                proto_labels_l_fg = lab_a * img_mask + plab_a_fg * (1 - img_mask)
-                proto_labels_u_fg = plab_b_fg * img_mask + lab_b * (1 - img_mask)
-                proto_labels_fg = torch.cat([proto_labels_l_fg, proto_labels_u_fg], dim=0).long()
-                conf_a_fg = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
-                conf_b_fg = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
-                proto_conf_l_fg = torch.ones_like(lab_a, dtype=outputs_l.dtype) * img_mask + conf_a_fg * (1 - img_mask)
-                proto_conf_u_fg = conf_b_fg * img_mask + torch.ones_like(lab_b, dtype=outputs_u.dtype) * (1 - img_mask)
-                proto_conf_fg = torch.cat([proto_conf_l_fg, proto_conf_u_fg], dim=0)
+                if local_args.proto_branch == "fg":
+                    proto_labels_l = lab_a * img_mask + plab_a_fg * (1 - img_mask)
+                    proto_labels_u = plab_b_fg * img_mask + lab_b * (1 - img_mask)
+                    conf_a = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
+                    conf_b = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
+                    proto_conf_l = torch.ones_like(lab_a, dtype=outputs_l.dtype) * img_mask + conf_a * (1 - img_mask)
+                    proto_conf_u = conf_b * img_mask + torch.ones_like(lab_b, dtype=outputs_u.dtype) * (1 - img_mask)
+                else:
+                    proto_labels_l = lab_a_s_bg * img_mask + plab_a_s_bg * (1 - img_mask)
+                    proto_labels_u = plab_b_s_bg * img_mask + lab_b_s_bg * (1 - img_mask)
+                    conf_a = F.softmax(unoutput_a_bg, dim=1).max(dim=1).values
+                    conf_b = F.softmax(unoutput_b_bg, dim=1).max(dim=1).values
+                    proto_conf_l = torch.ones_like(lab_a_s_bg, dtype=outputs_l.dtype) * img_mask + conf_a * (1 - img_mask)
+                    proto_conf_u = conf_b * img_mask + torch.ones_like(lab_b_s_bg, dtype=outputs_u.dtype) * (1 - img_mask)
+
+                proto_labels = torch.cat([proto_labels_l, proto_labels_u], dim=0).long()
+                proto_conf = torch.cat([proto_conf_l, proto_conf_u], dim=0)
+
+            proto_features = torch.cat([feat_l_fg, feat_u_fg], dim=0)
+            if local_args.proto_branch == "bg":
+                proto_features = torch.cat([feat_l_bg, feat_u_bg], dim=0)
 
             proto_loss, proto_stats = proto_criterion(
-                feat_fg=torch.cat([feat_l_fg, feat_u_fg], dim=0),
-                labels_fg=proto_labels_fg,
-                confidence_fg=proto_conf_fg,
+                features=proto_features,
+                labels=proto_labels,
+                confidence=proto_conf,
             )
 
             loss = loss_l + loss_u + loss_l_bg + loss_u_bg + local_args.proto_weight * proto_loss
