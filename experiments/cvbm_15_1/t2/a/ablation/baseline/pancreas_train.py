@@ -17,30 +17,28 @@ from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from skimage.measure import label
 import numpy as np
-from einops import rearrange
 
 from utils import losses, ramps, test_3d_patch
-from dataloaders.dataset import LAHeart, RandomRotFlip, RandomCrop, ToTensor, TwoStreamBatchSampler, DualAugmentTransform
-from dataloaders.datasets_3d import WeakStrongAugment3d
-from .modules import CVBMArgumentWithCrossSKC3DProto
-from .prototype_losses import BranchBatchPrototypeLoss
+from dataloaders.datasets_3d import WeakStrongAugment3d, Pancreas, TwoStreamBatchSampler
+from networks.CVBM import Decoder, Encoder
+from ..prototype_losses import BranchBatchPrototypeLoss
 from networks.net_factory import net_factory
-from utils.util import compute_sdf, compute_sdf_bg
-from utils.BCP_utils import context_mask, mix_loss, update_ema_variables
+from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variables
+
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='/root/LA', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_LA_CrossSKC', help='exp_name')
+parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
+parser.add_argument('--exp', type=str, default='CVBM_Pancreas_Ablation_Without_SKC', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
-parser.add_argument('--pre_max_iteration', type=int, default=2000, help='maximum pre-train iteration to train')
+parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
-parser.add_argument('--max_samples', type=int, default=80, help='maximum samples to train')
-parser.add_argument('--labeled_bs', type=int, default=2, help='batch_size of labeled data per gpu')
-parser.add_argument('--batch_size', type=int, default=4, help='batch_size per gpu')
-parser.add_argument('--patch_size', type=tuple, default=(112, 112, 80), help='patch_size of loading image')
+parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
+parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
+parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
+parser.add_argument('--patch_size', type=tuple, default=(96, 96, 96), help='patch_size of loading image')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
-parser.add_argument('--labelnum', type=int, default=8, help='trained samples')
+parser.add_argument('--labelnum', type=int, default=12, help='trained samples')
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--num_workers', type=int, default=8, help='cpu core num_workers')
@@ -57,28 +55,108 @@ parser.add_argument('--proto_conf_threshold', type=float, default=0.8, help='con
 parser.add_argument('--proto_query_threshold', type=float, default=0.0, help='confidence threshold for prototype queries')
 parser.add_argument('--proto_patch', type=tuple, default=(8, 8, 8), help='patch size for prototype pooling')
 parser.add_argument('--proto_max_queries', type=int, default=4096, help='max patch queries per prototype branch')
+# -- setting of BANET
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
 parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of mask/image')
+# -- setting of mixup
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_13_1_cross_attn/1/', help='snapshot path to save model')
+parser.add_argument(
+    '--snapshot_path',
+    type=str,
+    default='./results/CVBM_15_1_t2_a/ablation/without_skc_prototype_only/',
+    help='snapshot path to save model',
+)
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
+
+
+class DecoderWithFeature(Decoder):
+    def forward(self, features):
+        x1, x2, x3, x4, x5 = features
+
+        x5_up = self.block_five_up(x5)
+        x5_up = x5_up + x4
+
+        x6 = self.block_six(x5_up)
+        x6_up = self.block_six_up(x6)
+        x6_up = x6_up + x3
+
+        x7 = self.block_seven(x6_up)
+        x7_up = self.block_seven_up(x7)
+        x7_up = x7_up + x2
+
+        x8 = self.block_eight(x7_up)
+        x8_up = self.block_eight_up(x8)
+        x8_up = x8_up + x1
+
+        x9 = self.block_nine(x8_up)
+        out_seg2 = self.out_conv2(x9)
+        out_tanh = self.tanh(out_seg2)
+        proto_feature = x9
+        if self.has_dropout:
+            x9 = self.dropout(x9)
+        out_seg = self.out_conv(x9)
+
+        return out_seg, out_tanh, proto_feature
+
+
+class CVBMArgumentWithoutSKC3DProto(nn.Module):
+    """Dual-branch CVBM prototype model without semantic interaction."""
+
+    def __init__(
+        self,
+        n_channels: int = 1,
+        n_classes: int = 2,
+        n_filters: int = 16,
+        normalization: str = "instancenorm",
+        has_dropout: bool = False,
+        has_residual: bool = False,
+    ) -> None:
+        super().__init__()
+        self.encoder = Encoder(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+        )
+        self.decoder_fg = DecoderWithFeature(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+            up_type=0,
+        )
+        self.decoder_bg = DecoderWithFeature(
+            n_channels,
+            n_classes,
+            n_filters,
+            normalization,
+            has_dropout,
+            has_residual,
+            up_type=2,
+        )
+        self.final_seg = nn.Conv3d(n_classes * 2, n_classes, kernel_size=1)
+
+    def forward(self, input_fg, input_bg):
+        fg_feats = list(self.encoder(input_fg))
+        bg_feats = list(self.encoder(input_bg))
+
+        out_fg, attn_fg, feat_fg = self.decoder_fg(fg_feats)
+        out_bg, attn_bg, feat_bg = self.decoder_bg(bg_feats)
+
+        fused_logits = self.final_seg(torch.cat([out_fg, out_bg], dim=1))
+        return out_fg, fused_logits, out_bg, attn_fg, attn_bg, feat_fg, feat_bg
 
 
 def get_cut_mask(out, thres=0.5, nms=0):
     probs = F.softmax(out, 1)
     masks = (probs >= thres).type(torch.int64)
-    masks = masks[:, 1, :, :].contiguous()
-    if nms == 1:
-        masks = LargestCC(masks)
-    return masks
-
-
-def get_cut_mask_bg(out, thres=0.5, nms=0):
-    probs = F.softmax(out, 1)
-    masks = (probs <= thres).type(torch.int64)
     masks = masks[:, 1, :, :].contiguous()
     if nms == 1:
         masks = LargestCC(masks)
@@ -122,11 +200,7 @@ def load_net(net, path):
 def load_pretrained_backbone(model, ckpt_path):
     """
     Loads encoder/decoder weights from a vanilla CVBM_Argument checkpoint into
-    the cross-attention SKC backbone.
-
-    The encoder and both decoders are shape-compatible with the pretraining
-    model, while the newly introduced cross-attention interaction layers are
-    initialized from scratch.
+    the dual-branch prototype model without SKC.
     """
     state = torch.load(str(ckpt_path))
     state_dict = state['net'] if 'net' in state else state
@@ -143,12 +217,6 @@ def get_current_consistency_weight(epoch):
 
 
 def select_patches_for_contrast_3d(output_mix, topnum=16, patch_size=(4, 4, 4), choose_largest=False):
-    """
-    output_mix: [B, C, H, W, D]
-    Returns:
-      pos_patches: [B, topnum, C]
-      neg_patches: [B, L-topnum, C]
-    """
     B, C, H, W, D = output_mix.shape
     ph, pw, pd = patch_size
     assert H % ph == 0 and W % pw == 0 and D % pd == 0, "H/W/D must be divisible by patch_size"
@@ -169,10 +237,7 @@ def select_patches_for_contrast_3d(output_mix, topnum=16, patch_size=(4, 4, 4), 
     feat_patches = F.avg_pool3d(probs, kernel_size=(ph, pw, pd), stride=(ph, pw, pd))
     feat_patches = feat_patches.flatten(2).permute(0, 2, 1).contiguous()
 
-    pos_patches = torch.gather(
-        feat_patches, dim=1,
-        index=top_idx.unsqueeze(-1).expand(-1, -1, C)
-    )
+    pos_patches = torch.gather(feat_patches, dim=1, index=top_idx.unsqueeze(-1).expand(-1, -1, C))
     neg_patches = feat_patches[mask].view(B, num_neg, C)
 
     return pos_patches, neg_patches
@@ -186,13 +251,6 @@ class BlockInfoNCELoss(nn.Module):
         self.temperature = temperature
 
     def forward(self, pos_patches, neg_patches):
-        """
-        Multi-positive InfoNCE over selected low-confidence patches.
-
-        pos_patches: [B, K, C], each selected patch is an anchor and
-            the other selected patches in the same sample are positives.
-        neg_patches: [B, N, C], remaining patches are negatives.
-        """
         pos_patches = F.normalize(pos_patches, p=2, dim=-1)
         neg_patches = F.normalize(neg_patches, p=2, dim=-1)
 
@@ -232,17 +290,18 @@ if args.deterministic:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-patch_size = (112, 112, 80)
+patch_size = args.patch_size
 num_classes = 2
 
 
 def pre_train(args, snapshot_path):
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
-    db_train = LAHeart(base_dir=train_data_path,
-                       split='train',
-                       transform=transforms.Compose([
-                            WeakStrongAugment3d(args.patch_size, flag_rot=False)
-                       ]))
+    db_train = Pancreas(
+        base_dir=train_data_path,
+        split='train',
+        transform=transforms.Compose([
+            WeakStrongAugment3d(args.patch_size, flag_rot=True)
+        ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
     unlabeled_idxs = list(range(labelnum, args.max_samples))
@@ -254,18 +313,21 @@ def pre_train(args, snapshot_path):
         random.seed(args.seed + worker_id)
 
     trainloader = DataLoader(
-        db_train, batch_sampler=batch_sampler,
+        db_train,
+        batch_sampler=batch_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
         worker_init_fn=worker_init_fn,
         pin_memory_device="cuda",
         persistent_workers=True,
-        )
+    )
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     DICE = losses.mask_DiceLoss(nclass=2)
-    consistency_criterion = losses.mse_loss
+    focal_loss = losses.FocalLoss(alpha=2.0, gamma=2.0)
+    binary_tversky_loss = losses.BinaryTverskyLoss3D(alpha=0.7, beta=0.3)
+
     writer = SummaryWriter(snapshot_path + '/log')
-    logging.info("{} itertations per epoch".format(len(trainloader)))
+    logging.info("%d itertations per epoch", len(trainloader))
     iter_num = 0
     best_dice = 0
     max_epoch = pre_max_iterations // len(trainloader) + 1
@@ -273,8 +335,7 @@ def pre_train(args, snapshot_path):
     for epoch_num in iterator:
         for _, sampled_batch in enumerate(trainloader):
             model.train()
-            volume_batch, label_batch = sampled_batch['image'][:args.labeled_bs], sampled_batch['label'][
-                                                                                  :args.labeled_bs]
+            volume_batch, label_batch = sampled_batch['image'][:args.labeled_bs], sampled_batch['label'][:args.labeled_bs]
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:]
@@ -283,59 +344,61 @@ def pre_train(args, snapshot_path):
             volume_batch_strong, label_batch_strong = volume_batch_strong.cuda(), label_batch_strong.cuda()
             img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
             lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
-            lab_a_s_bg, lab_b_s_bg = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0
-
             with torch.no_grad():
-                img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
+                img_mask, loss_mask = context_mask_pancreas(img_a, args.mask_ratio)
 
-            """Mix Input"""
             volume_batch = img_a * img_mask + img_b * (1 - img_mask)
             label_batch = lab_a * img_mask + lab_b * (1 - img_mask)
 
             volume_batch_strong = img_a_s * img_mask + img_b_s * (1 - img_mask)
             label_batch_strong = lab_a_s * img_mask + lab_b_s * (1 - img_mask)
 
-            outputs_fg, outputs, outputs_bg, *_ = model(volume_batch, volume_batch_strong)
+            outputs_fg, outputs, outputs_bg, out_tanh, out_tanh_bg = model(volume_batch, volume_batch_strong)
             loss_seg = 0
             loss_seg_dice = 0
-            loss_sdf = 0
 
             y2 = outputs_fg[:args.labeled_bs, ...]
-
             y_prob2 = F.softmax(y2, dim=1)
             loss_seg += F.cross_entropy(y2[:args.labeled_bs], (label_batch[:args.labeled_bs, ...] == 1).long())
-            loss_seg_dice += DICE(y_prob2, label_batch[:args.labeled_bs, ...] == 1)
+            loss_seg_dice += DICE(y2, label_batch[:args.labeled_bs, ...] == 1)
 
             y_bg = outputs_bg[:args.labeled_bs, ...]
             y_prob_bg = F.softmax(y_bg, dim=1)
             loss_seg += F.cross_entropy(y_bg[:args.labeled_bs], (label_batch_strong[:args.labeled_bs, ...] == 0).long())
-            loss_seg_dice += DICE(y_prob_bg, label_batch_strong[:args.labeled_bs, ...] == 0)
+            loss_seg_dice += DICE(y_bg, label_batch_strong[:args.labeled_bs, ...] == 0)
 
             loss = (loss_seg + loss_seg_dice) / 2
 
             iter_num += 1
+
             writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
             writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
-            writer.add_scalar('pre/loss_sdf', loss_seg, iter_num)
             writer.add_scalar('pre/loss_all', loss, iter_num)
-            logging.info("y_prob2: {}, label_batch: {}".format(torch.argmax(y_prob2, dim=1).sum(), label_batch.sum()))
+            writer.add_scalar('pre/loss_seg_dice', loss_seg_dice, iter_num)
+            writer.add_scalar('pre/loss_seg', loss_seg, iter_num)
+            writer.add_scalar('pre/loss_all', loss, iter_num)
+            logging.info("y_prob2: %s, label_batch: %s", torch.argmax(y_prob2, dim=1).sum(), label_batch.sum())
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f,loss_sdf: %03f' % (
-            iter_num, loss, loss_seg_dice, loss_seg, loss_sdf))
+            logging.info('iteration %d : loss: %03f, loss_dice: %03f, loss_ce: %03f', iter_num, loss, loss_seg_dice, loss_seg)
 
-            if iter_num % 200 == 0:
+            if iter_num % 200 == 0 and torch.argmax(y_prob2, dim=1).sum() != 0:
                 model.eval()
-                dice_sample = test_3d_patch.var_all_case_LA_argument(model, num_classes=num_classes, patch_size=patch_size,
-                                                            stride_xy=18, stride_z=4, dataset_path=args.root_path)
+                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
+                    model,
+                    num_classes=num_classes,
+                    patch_size=patch_size,
+                    stride_xy=16,
+                    stride_z=16,
+                    dataset_path=args.root_path)
                 if dice_sample > best_dice:
                     best_dice = round(dice_sample, 4)
-                    save_mode_path = os.path.join(snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
-                    save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+                    save_mode_path = os.path.join(snapshot_path, f'iter_{iter_num}_dice_{best_dice}.pth')
+                    save_best_path = os.path.join(snapshot_path, f'{args.model}_best_model.pth')
                     save_net_opt(model, optimizer, save_mode_path)
                     save_net_opt(model, optimizer, save_best_path)
-                    logging.info("save best model to {}".format(save_mode_path))
+                    logging.info("save best model to %s", save_mode_path)
                 writer.add_scalar('4_Var_dice/Dice', dice_sample, iter_num)
                 writer.add_scalar('4_Var_dice/Best_dice', best_dice, iter_num)
 
@@ -349,16 +412,13 @@ def pre_train(args, snapshot_path):
 
 
 def self_train(args, pre_snapshot_path, self_snapshot_path):
-    # Cross-attention semantic interaction backbone:
-    # weak/foreground and strong/background bottleneck features are explicitly
-    # updated through bidirectional fg<->bg interaction before task-specific decoding.
-    model = CVBMArgumentWithCrossSKC3DProto(
+    model = CVBMArgumentWithoutSKC3DProto(
         n_channels=1,
         n_classes=num_classes,
         normalization='instancenorm',
         has_dropout=True,
     ).cuda()
-    ema_model = CVBMArgumentWithCrossSKC3DProto(
+    ema_model = CVBMArgumentWithoutSKC3DProto(
         n_channels=1,
         n_classes=num_classes,
         normalization='instancenorm',
@@ -366,11 +426,12 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     ).cuda()
     for param in ema_model.parameters():
         param.detach_()
-    db_train = LAHeart(base_dir=train_data_path,
-                       split='train',
-                       transform=transforms.Compose([
-                            WeakStrongAugment3d(args.patch_size, flag_rot=False)
-                       ]))
+    db_train = Pancreas(
+        base_dir=train_data_path,
+        split='train',
+        transform=transforms.Compose([
+            WeakStrongAugment3d(args.patch_size, flag_rot=True)
+        ]))
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
     unlabeled_idxs = list(range(labelnum, args.max_samples))
@@ -381,15 +442,16 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    trainloader = DataLoader(db_train,
+    trainloader = DataLoader(
+        db_train,
         batch_sampler=batch_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
         worker_init_fn=worker_init_fn,
         pin_memory_device="cuda",
-        persistent_workers=True
-        )
-    # BCLLoss = BlockInfoNCELoss(temperature=args.contrast_temperature)
+        persistent_workers=True,
+    )
+    BCLLoss = BlockInfoNCELoss(temperature=args.contrast_temperature)
     proto_criterion = BranchBatchPrototypeLoss(
         in_channels=16,
         proj_dim=args.proto_dim,
@@ -412,11 +474,9 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
     load_pretrained_backbone(ema_model, pretrained_model)
 
     writer = SummaryWriter(self_snapshot_path + '/log')
-    logging.info("{} itertations per epoch".format(len(trainloader)))
+    logging.info("%d itertations per epoch", len(trainloader))
     iter_num = 0
-
     max_epoch = self_max_iterations // len(trainloader) + 1
-    lr_ = base_lr
     iterator = tqdm(range(max_epoch), ncols=70)
 
     best_dice = 0
@@ -432,15 +492,14 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             img_a, img_b = volume_batch[:sub_bs], volume_batch[sub_bs:args.labeled_bs]
             lab_a, lab_b = label_batch[:sub_bs], label_batch[sub_bs:args.labeled_bs]
             lab_a_bg, lab_b_bg = label_batch[:sub_bs] == 0, label_batch[sub_bs:args.labeled_bs] == 0
-            unimg_a, unimg_b = volume_batch[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch[
-                                                                                       args.labeled_bs + sub_bs:]
+            unimg_a, unimg_b = volume_batch[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch[args.labeled_bs + sub_bs:]
+
             volume_batch_strong, label_batch_strong = sampled_batch['image_strong'], sampled_batch['label_strong']
             volume_batch_strong, label_batch_strong = volume_batch_strong.cuda(), label_batch_strong.cuda()
             img_a_s, img_b_s = volume_batch_strong[:sub_bs], volume_batch_strong[sub_bs:args.labeled_bs]
             lab_a_s, lab_b_s = label_batch_strong[:sub_bs], label_batch_strong[sub_bs:args.labeled_bs]
             lab_a_s_bg, lab_b_s_bg = label_batch_strong[:sub_bs] == 0, label_batch_strong[sub_bs:args.labeled_bs] == 0
-            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[
-                                                                                       args.labeled_bs + sub_bs:]
+            unimg_a_s, unimg_b_s = volume_batch_strong[args.labeled_bs:args.labeled_bs + sub_bs], volume_batch_strong[args.labeled_bs + sub_bs:]
 
             with torch.no_grad():
                 unoutput_a_fg, unoutput_a, unoutput_a_bg, unoutput_a_sdm, unoutput_a_sdm_bg, _, _ = ema_model(unimg_a, unimg_a_s)
@@ -451,16 +510,19 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 plab_b_fg = get_cut_mask(unoutput_b_fg, nms=1)
                 plab_a_s_bg = get_cut_mask(unoutput_a_bg, nms=1)
                 plab_b_s_bg = get_cut_mask(unoutput_b_bg, nms=1)
-                img_mask, loss_mask = context_mask(img_a, args.mask_ratio)
+                img_mask, loss_mask = context_mask_pancreas(img_a, args.mask_ratio)
 
             mixl_img = img_a * img_mask + unimg_a * (1 - img_mask)
             mixu_img = unimg_b * img_mask + img_b * (1 - img_mask)
             mixl_img_s = img_a_s * img_mask + unimg_a_s * (1 - img_mask)
             mixu_img_s = unimg_b_s * img_mask + img_b_s * (1 - img_mask)
+
             mixl_lab = lab_a * img_mask + plab_a * (1 - img_mask)
             mixu_lab = plab_b * img_mask + lab_b * (1 - img_mask)
+
             outputs_l_fg, outputs_l, outputs_l_bg, sdm_outputs_l, sdm_outputs_l_bg, feat_l_fg, feat_l_bg = model(mixl_img, mixl_img_s)
             outputs_u_fg, outputs_u, outputs_u_bg, sdm_outputs_u, sdm_outputs_u_bg, feat_u_fg, feat_u_bg = model(mixu_img, mixu_img_s)
+
             output_mix_bg_fg = torch.cat([outputs_l, outputs_u], dim=0)
 
             consistency_weight = get_current_consistency_weight(iter_num // 150)
@@ -470,6 +532,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             loss_l_bg = mix_loss(outputs_l_bg, lab_a_s_bg, plab_a_s_bg, loss_mask, u_weight=args.u_weight)
             loss_u_bg = mix_loss(outputs_u_bg, plab_b_s_bg, lab_b_s_bg, loss_mask, u_weight=args.u_weight, unlab=True)
 
+            # The t2/a baseline disables block InfoNCE and keeps only prototype contrast.
+            # This ablation follows the same contrast setting while removing SKC.
             # pos_patches, neg_patches = select_patches_for_contrast_3d(
             #     output_mix_bg_fg,
             #     topnum=args.topnum,
@@ -484,7 +548,6 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 proto_labels_u_bg = plab_b_s_bg * img_mask + lab_b_s_bg * (1 - img_mask)
                 proto_labels_fg = torch.cat([proto_labels_l_fg, proto_labels_u_fg], dim=0).long()
                 proto_labels_bg = torch.cat([proto_labels_l_bg, proto_labels_u_bg], dim=0).long()
-
                 conf_a_fg = F.softmax(unoutput_a_fg, dim=1).max(dim=1).values
                 conf_b_fg = F.softmax(unoutput_b_fg, dim=1).max(dim=1).values
                 conf_a_bg = F.softmax(unoutput_a_bg, dim=1).max(dim=1).values
@@ -505,7 +568,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 confidence_bg=proto_conf_bg,
             )
 
-            loss = loss_l + loss_u + loss_l_bg + loss_u_bg  + args.proto_weight * proto_loss
+            loss = loss_l + loss_u + loss_l_bg + loss_u_bg + args.proto_weight * proto_loss
 
             iter_num += 1
             writer.add_scalar('Self/consistency', consistency_weight, iter_num)
@@ -521,33 +584,42 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info(
-                'iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_proto: %03f' % (
-                iter_num, loss, loss_l, loss_u, proto_loss))
+            logging.info('iteration %d : loss: %03f, loss_l: %03f, loss_u: %03f, loss_proto: %03f',
+                         iter_num, loss, loss_l, loss_u, proto_loss)
 
             update_ema_variables(model, ema_model, 0.99)
 
             if iter_num % 200 == 0:
                 model.eval()
                 ema_model.eval()
-                dice_sample = test_3d_patch.var_all_case_LA_argument(model, num_classes=num_classes, patch_size=patch_size,
-                                                            stride_xy=18, stride_z=4, dataset_path=args.root_path)
-                ema_dice_sample = test_3d_patch.var_all_case_LA_argument(ema_model, num_classes=num_classes, patch_size=patch_size,
-                                                            stride_xy=18, stride_z=4, dataset_path=args.root_path)
+                dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
+                    model,
+                    num_classes=num_classes,
+                    patch_size=patch_size,
+                    stride_xy=16,
+                    stride_z=16,
+                    dataset_path=args.root_path)
+                ema_dice_sample = test_3d_patch.var_all_case_Pancreas_argument(
+                    ema_model,
+                    num_classes=num_classes,
+                    patch_size=patch_size,
+                    stride_xy=16,
+                    stride_z=16,
+                    dataset_path=args.root_path)
                 if dice_sample > best_dice:
-                    best_dice = round(dice_sample, 7)
-                    save_mode_path = os.path.join(self_snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
-                    save_best_path = os.path.join(self_snapshot_path, '{}_best_model.pth'.format(args.model))
+                    best_dice = round(dice_sample, 4)
+                    save_mode_path = os.path.join(self_snapshot_path, f'iter_{iter_num}_dice_{best_dice}.pth')
+                    save_best_path = os.path.join(self_snapshot_path, f'{args.model}_best_model.pth')
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
-                    logging.info("save best model to {}".format(save_mode_path))
+                    logging.info("save best model to %s", save_mode_path)
                 if ema_dice_sample > ema_best_dice:
-                    ema_best_dice = round(ema_dice_sample, 7)
-                    save_mode_path = os.path.join(self_snapshot_path, 'iter_{}_ema_dice_{}.pth'.format(iter_num, ema_best_dice))
-                    save_ema_best_path = os.path.join(self_snapshot_path, '{}_ema_best_model.pth'.format(args.model))
+                    ema_best_dice = round(ema_dice_sample, 4)
+                    save_mode_path = os.path.join(self_snapshot_path, f'iter_{iter_num}_ema_dice_{ema_best_dice}.pth')
+                    save_ema_best_path = os.path.join(self_snapshot_path, f'{args.model}_ema_best_model.pth')
                     torch.save(ema_model.state_dict(), save_mode_path)
                     torch.save(ema_model.state_dict(), save_ema_best_path)
-                    logging.info("save best model to {}".format(save_mode_path))
+                    logging.info("save best ema model to %s", save_mode_path)
                 writer.add_scalar('4_Var_dice/Dice', ema_dice_sample, iter_num)
                 writer.add_scalar('4_Var_dice/Best_dice', ema_best_dice, iter_num)
                 model.train()
@@ -567,12 +639,9 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 target = mixl_lab[0, ...].permute(2, 0, 1)
                 train_img = mixl_img[0, 0, ...].permute(2, 0, 1)
 
-                snapshot_img[:, 0, :H, :W] = (train_img - torch.min(train_img)) / (
-                            torch.max(train_img) - torch.min(train_img))
-                snapshot_img[:, 1, :H, :W] = (train_img - torch.min(train_img)) / (
-                            torch.max(train_img) - torch.min(train_img))
-                snapshot_img[:, 2, :H, :W] = (train_img - torch.min(train_img)) / (
-                            torch.max(train_img) - torch.min(train_img))
+                snapshot_img[:, 0, :H, :W] = (train_img - torch.min(train_img)) / (torch.max(train_img) - torch.min(train_img))
+                snapshot_img[:, 1, :H, :W] = (train_img - torch.min(train_img)) / (torch.max(train_img) - torch.min(train_img))
+                snapshot_img[:, 2, :H, :W] = (train_img - torch.min(train_img)) / (torch.max(train_img) - torch.min(train_img))
 
                 snapshot_img[:, 0, H + ins_width:2 * H + ins_width, :W] = target
                 snapshot_img[:, 1, H + ins_width:2 * H + ins_width, :W] = target
@@ -582,19 +651,16 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 snapshot_img[:, 1, 2 * H + 2 * ins_width:3 * H + 2 * ins_width, :W] = seg_out
                 snapshot_img[:, 2, 2 * H + 2 * ins_width:3 * H + 2 * ins_width, :W] = seg_out
 
-                writer.add_images('Epoch_%d_Iter_%d_labeled' % (epoch, iter_num), snapshot_img)
+                writer.add_images(f'Epoch_{epoch}_Iter_{iter_num}_labeled', snapshot_img)
 
                 outputs_u_soft = F.softmax(outputs_u, dim=1)
                 seg_out = outputs_u_soft[0, 1, ...].permute(2, 0, 1)
                 target = mixu_lab[0, ...].permute(2, 0, 1)
                 train_img = mixu_img[0, 0, ...].permute(2, 0, 1)
 
-                snapshot_img[:, 0, :H, :W] = (train_img - torch.min(train_img)) / (
-                            torch.max(train_img) - torch.min(train_img))
-                snapshot_img[:, 1, :H, :W] = (train_img - torch.min(train_img)) / (
-                            torch.max(train_img) - torch.min(train_img))
-                snapshot_img[:, 2, :H, :W] = (train_img - torch.min(train_img)) / (
-                            torch.max(train_img) - torch.min(train_img))
+                snapshot_img[:, 0, :H, :W] = (train_img - torch.min(train_img)) / (torch.max(train_img) - torch.min(train_img))
+                snapshot_img[:, 1, :H, :W] = (train_img - torch.min(train_img)) / (torch.max(train_img) - torch.min(train_img))
+                snapshot_img[:, 2, :H, :W] = (train_img - torch.min(train_img)) / (torch.max(train_img) - torch.min(train_img))
 
                 snapshot_img[:, 0, H + ins_width:2 * H + ins_width, :W] = target
                 snapshot_img[:, 1, H + ins_width:2 * H + ins_width, :W] = target
@@ -604,7 +670,7 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
                 snapshot_img[:, 1, 2 * H + 2 * ins_width:3 * H + 2 * ins_width, :W] = seg_out
                 snapshot_img[:, 2, 2 * H + 2 * ins_width:3 * H + 2 * ins_width, :W] = seg_out
 
-                writer.add_images('Epoch_%d_Iter_%d_unlabel' % (epoch, iter_num), snapshot_img)
+                writer.add_images(f'Epoch_{epoch}_Iter_{iter_num}_unlabel', snapshot_img)
 
             if iter_num >= self_max_iterations:
                 break
@@ -618,17 +684,19 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
 if __name__ == "__main__":
     pre_snapshot_path = "{}/{}_{}_labeled/pre_train".format(args.snapshot_path, args.exp, args.labelnum)
     self_snapshot_path = "{}/{}_{}_labeled/self_train".format(args.snapshot_path, args.exp, args.labelnum)
-    print("Starting CVBM Cross-SKC training.")
+    print("Starting pancreas ablation training without SKC and with prototype contrast only.")
     for snapshot_path in [pre_snapshot_path, self_snapshot_path]:
         if not os.path.exists(snapshot_path):
             os.makedirs(snapshot_path)
         if os.path.exists(snapshot_path + '/code'):
             shutil.rmtree(snapshot_path + '/code')
+
     logging.basicConfig(filename=pre_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
     pre_train(args, pre_snapshot_path)
+
     logging.basicConfig(filename=self_snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))

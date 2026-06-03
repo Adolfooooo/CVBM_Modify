@@ -37,6 +37,12 @@ parser.add_argument(
     help='also test <model>_ema_best_model.pth when stage_name is self_train',
 )
 parser.add_argument('--save_result', type=int, default=0, help='save nii.gz predictions')
+parser.add_argument(
+    '--test_save_path',
+    type=str,
+    default=None,
+    help='optional prediction output directory; defaults under snapshot_path',
+)
 args = parser.parse_args()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -48,11 +54,14 @@ snapshot_path = os.path.join(
     '{}_{}_labeled'.format(args.exp, args.labelnum),
     args.stage_name,
 )
-test_save_path = os.path.join(
-    args.snapshot_path,
-    '{}_{}_labeled'.format(args.exp, args.labelnum),
-    '{}_predictions'.format(args.model),
-)
+if args.test_save_path is not None:
+    test_save_path = args.test_save_path
+else:
+    test_save_path = os.path.join(
+        args.snapshot_path,
+        '{}_{}_labeled'.format(args.exp, args.labelnum),
+        '{}_predictions'.format(args.model),
+    )
 
 os.makedirs(test_save_path, exist_ok=True)
 print(test_save_path)

@@ -24,6 +24,10 @@ parser.add_argument('--snapshot_path', type=str, default='./results/ablation/skc
                     help='snapshot root used by la_train.py')
 parser.add_argument('--checkpoint_dir', type=str, default=None,
                     help='optional directory containing model checkpoints; overrides snapshot_path/exp/labelnum/stage_name')
+parser.add_argument('--checkpoint', type=str, default=None,
+                    help='optional explicit checkpoint path; overrides checkpoint_dir and snapshot path resolution')
+parser.add_argument('--test_ema', type=int, default=0,
+                    help='also test <model>_ema_best_model.pth when stage_name is self_train and the file exists')
 parser.add_argument('--save_result', action='store_true', help='save prediction nii.gz files')
 parser.add_argument('--test_save_path', type=str, default=None,
                     help='optional prediction output directory; defaults under snapshot_path')
@@ -70,7 +74,7 @@ image_list = [
 def load_checkpoint(model, path):
     if not os.path.exists(path):
         raise FileNotFoundError('checkpoint not found: {}'.format(path))
-    state = torch.load(path)
+    state = torch.load(path, map_location='cpu')
     if isinstance(state, dict) and 'net' in state:
         state = state['net']
     model.load_state_dict(state)
@@ -106,12 +110,14 @@ def evaluate_checkpoint(ckpt_path, name):
 
 
 def test_calculate_metric_argument():
-    save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+    save_model_path = args.checkpoint
+    if save_model_path is None:
+        save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
     metric = evaluate_checkpoint(save_model_path, 'model')
 
     ema_metric = None
     save_ema_model_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
-    if args.stage_name == 'self_train' or os.path.exists(save_ema_model_path):
+    if args.test_ema and args.stage_name == 'self_train' and os.path.exists(save_ema_model_path):
         ema_metric = evaluate_checkpoint(save_ema_model_path, 'ema_model')
 
     return metric, ema_metric
