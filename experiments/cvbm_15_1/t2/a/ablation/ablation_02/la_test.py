@@ -23,6 +23,18 @@ parser.add_argument('--stage_name', type=str, default='self_train', choices=['pr
                     help='checkpoint stage to evaluate')
 parser.add_argument('--snapshot_path', type=str, default='./results/ablation_03_remove_contrast_keep_skc/',
                     help='snapshot path used by la_train.py')
+parser.add_argument(
+    '--checkpoint',
+    type=str,
+    default=None,
+    help='optional explicit checkpoint path; defaults to <snapshot>/<exp>_<labelnum>_labeled/<stage>/<model>_best_model.pth',
+)
+parser.add_argument(
+    '--test_ema',
+    type=int,
+    default=1,
+    help='also test <model>_ema_best_model.pth when stage_name is self_train',
+)
 parser.add_argument('--save_result', action='store_true', help='save nii.gz predictions')
 args = parser.parse_args()
 
@@ -93,11 +105,13 @@ def evaluate_checkpoint(checkpoint_path):
 
 
 def test_calculate_metric_argument():
-    save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+    save_model_path = args.checkpoint
+    if save_model_path is None:
+        save_model_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
     metric = evaluate_checkpoint(save_model_path)
 
     save_ema_model_path = os.path.join(snapshot_path, '{}_ema_best_model.pth'.format(args.model))
-    if args.stage_name == 'self_train' and os.path.exists(save_ema_model_path):
+    if args.test_ema and args.stage_name == 'self_train' and os.path.exists(save_ema_model_path):
         ema_metric = evaluate_checkpoint(save_ema_model_path)
         return metric, ema_metric
 
