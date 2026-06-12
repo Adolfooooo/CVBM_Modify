@@ -1,0 +1,208 @@
+import argparse
+import ast
+import os
+
+import torch
+
+from experiments.cvbm_15_1.t6.modules import CVBMArgumentWithCrossSKC3DProto
+from utils.test_3d_patch import test_all_case_argument
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--root_path', type=str, default='/home/xuminghao/Datasets/LA/UA_MT', help='LA dataset root')
+parser.add_argument('--exp', type=str, default='CVBM_LA_FgQBgKV_CrossSKC', help='experiment name')
+parser.add_argument('--model', type=str, default='CVBM_Argument', help='checkpoint name prefix')
+parser.add_argument('--gpu', type=str, default='0', help='GPU id')
+parser.add_argument('--detail', type=int, default=1, help='print metrics for every sample')
+parser.add_argument('--nms', type=int, default=1, help='apply NMS post-processing')
+parser.add_argument('--labelnum', type=int, default=8, help='labeled training cases')
+parser.add_argument('--label_ratio', type=float, default=None,
+                    help='optional labeled ratio in percent; overrides labelnum when provided')
+parser.add_argument('--max_samples', type=int, default=80, help='total LA training cases used to compute label ratios')
+parser.add_argument('--patch_size', type=ast.literal_eval, default=(112, 112, 80), help='test patch size')
+parser.add_argument('--stride_xy', type=int, default=18, help='sliding-window stride for x/y')
+parser.add_argument('--stride_z', type=int, default=4, help='sliding-window stride for z')
+parser.add_argument('--eval_head', type=str, default='fg', choices=['fg', 'fused'], help='output head to evaluate')
+parser.add_argument('--stage_name', type=str, default='auto',
+                    choices=['auto', 'pre_train', 'self_train', 'fully_supervised'],
+                    help='checkpoint stage; auto uses fully_supervised for all labels, otherwise self_train')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t6_fgq_bgkv/1',
+                    help='snapshot root used by la_train.py')
+parser.add_argument('--checkpoint_dir', type=str, default=None,
+                    help='directory containing checkpoints; overrides snapshot_path/exp/labelnum/stage_name')
+parser.add_argument('--checkpoint', type=str, default=None,
+                    help='explicit checkpoint path; overrides checkpoint_dir')
+parser.add_argument('--ema_checkpoint', type=str, default=None,
+                    help='explicit EMA checkpoint path; defaults to <checkpoint_dir>/<model>_ema_best_model.pth')
+parser.add_argument('--test_ema', type=int, default=1,
+                    help='also test <model>_ema_best_model.pth when available')
+parser.add_argument('--save_result', action='store_true', help='save prediction nii.gz files')
+parser.add_argument('--test_save_path', type=str, default=None, help='prediction output directory')
+args = parser.parse_args()
+
+os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+num_classes = 2
+
+
+def resolve_labelnum():
+    if args.label_ratio is None:
+        labelnum = args.labelnum
+    else:
+        if args.label_ratio <= 0:
+            raise ValueError('--label_ratio must be > 0')
+        labelnum = int(round(args.max_samples * args.label_ratio / 100.0))
+        labelnum = max(1, labelnum)
+
+    if labelnum < 1:
+        raise ValueError('--labelnum must be >= 1')
+    if labelnum > args.max_samples:
+        raise ValueError('resolved labelnum cannot exceed --max_samples')
+    return labelnum
+
+
+def resolve_stage_name():
+    if args.stage_name != 'auto':
+        return args.stage_name
+    if resolve_labelnum() >= args.max_samples:
+        return 'fully_supervised'
+    return 'self_train'
+
+
+class EvalHeadWrapper(torch.nn.Module):
+    def __init__(self, model, head):
+        super().__init__()
+        self.model = model
+        self.head = head
+
+    def forward(self, input_fg, input_bg):
+        out_fg, fused_logits, out_bg, *rest = self.model(input_fg, input_bg)
+        if self.head == 'fused':
+            return fused_logits, out_fg, out_bg, *rest
+        return out_fg, fused_logits, out_bg, *rest
+
+
+def build_checkpoint_dir():
+    if args.checkpoint_dir is not None:
+        return args.checkpoint_dir
+    return os.path.join(
+        args.snapshot_path,
+        '{}_{}_labeled'.format(args.exp, resolve_labelnum()),
+        resolve_stage_name(),
+    )
+
+
+def build_test_save_path(tag=None):
+    if args.test_save_path is not None:
+        base_path = args.test_save_path
+    else:
+        base_path = os.path.join(
+            args.snapshot_path,
+            '{}_{}_labeled'.format(args.exp, resolve_labelnum()),
+            '{}_{}_{}_predictions'.format(args.model, resolve_stage_name(), args.eval_head),
+        )
+    if tag is None or tag == 'model':
+        return base_path
+    return '{}_{}'.format(base_path, tag)
+
+
+def create_model():
+    return CVBMArgumentWithCrossSKC3DProto(
+        n_channels=1,
+        n_classes=num_classes,
+        normalization='instancenorm',
+        has_dropout=True,
+    ).cuda()
+
+
+def load_checkpoint(model, path):
+    if not os.path.exists(path):
+        raise FileNotFoundError('checkpoint not found: {}'.format(path))
+    state = torch.load(path, map_location='cpu')
+    if isinstance(state, dict) and 'net' in state:
+        state = state['net']
+    model.load_state_dict(state)
+
+
+def build_image_list():
+    with open(os.path.join(args.root_path, 'test.list'), 'r') as f:
+        cases = [item.strip() for item in f.readlines()]
+    return [
+        os.path.join(args.root_path, '2018LA_Seg_Training Set', case, 'mri_norm2.h5')
+        for case in cases
+    ]
+
+
+def evaluate():
+    checkpoint_dir = build_checkpoint_dir()
+    checkpoint = args.checkpoint
+    if checkpoint is None:
+        checkpoint = os.path.join(checkpoint_dir, '{}_best_model.pth'.format(args.model))
+
+    test_save_path = build_test_save_path()
+    os.makedirs(test_save_path, exist_ok=True)
+    print(test_save_path)
+
+    model = create_model()
+    load_checkpoint(model, checkpoint)
+    print('init weight from {}'.format(checkpoint))
+
+    eval_model = EvalHeadWrapper(model, args.eval_head).cuda()
+    eval_model.eval()
+
+    metric = test_all_case_argument(
+        eval_model,
+        build_image_list(),
+        num_classes=num_classes,
+        patch_size=args.patch_size,
+        stride_xy=args.stride_xy,
+        stride_z=args.stride_z,
+        save_result=args.save_result,
+        test_save_path=test_save_path,
+        metric_detail=args.detail,
+        nms=args.nms,
+    )
+    print('metric [dice, jaccard, hd95, asd]: {}'.format(metric))
+    print('metric percent [dsc, jaccard]: {:.4f}, {:.4f}'.format(metric[0] * 100, metric[1] * 100))
+
+    metrics = {'model': metric}
+    if args.test_ema:
+        ema_checkpoint = args.ema_checkpoint
+        if ema_checkpoint is None:
+            ema_checkpoint_dir = os.path.dirname(checkpoint) if args.checkpoint is not None else checkpoint_dir
+            ema_checkpoint = os.path.join(ema_checkpoint_dir, '{}_ema_best_model.pth'.format(args.model))
+
+        if os.path.exists(ema_checkpoint):
+            ema_test_save_path = build_test_save_path('ema_model')
+            os.makedirs(ema_test_save_path, exist_ok=True)
+            print(ema_test_save_path)
+
+            ema_model = create_model()
+            load_checkpoint(ema_model, ema_checkpoint)
+            print('init ema weight from {}'.format(ema_checkpoint))
+
+            ema_eval_model = EvalHeadWrapper(ema_model, args.eval_head).cuda()
+            ema_eval_model.eval()
+
+            ema_metric = test_all_case_argument(
+                ema_eval_model,
+                build_image_list(),
+                num_classes=num_classes,
+                patch_size=args.patch_size,
+                stride_xy=args.stride_xy,
+                stride_z=args.stride_z,
+                save_result=args.save_result,
+                test_save_path=ema_test_save_path,
+                metric_detail=args.detail,
+                nms=args.nms,
+            )
+            metrics['ema_model'] = ema_metric
+            print('ema metric [dice, jaccard, hd95, asd]: {}'.format(ema_metric))
+            print('ema metric percent [dsc, jaccard]: {:.4f}, {:.4f}'.format(ema_metric[0] * 100, ema_metric[1] * 100))
+        else:
+            print('skip ema test; checkpoint not found: {}'.format(ema_checkpoint))
+
+    return metrics
+
+
+if __name__ == '__main__':
+    evaluate()
