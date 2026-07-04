@@ -28,13 +28,13 @@ from utils.BCP_utils import context_mask_pancreas, mix_loss, update_ema_variable
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str, default='/root/Pancreas', help='Name of Dataset')
-parser.add_argument('--exp', type=str, default='CVBM_Pancreas_15_1_a2', help='exp_name')
+parser.add_argument('--exp', type=str, default='CVBM_Pancreas_FgQBgKV_CrossSKC_A3_SampleProto', help='exp_name')
 parser.add_argument('--model', type=str, default='CVBM_Argument', help='model_name')
 parser.add_argument('--pre_max_iteration', type=int, default=3000, help='maximum pre-train iteration to train')
 parser.add_argument('--self_max_iteration', type=int, default=15000, help='maximum self-train iteration to train')
 parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
-parser.add_argument('--labeled_bs', type=int, default=2, help='batch_size of labeled data per gpu')
-parser.add_argument('--batch_size', type=int, default=4, help='batch_size per gpu')
+parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
+parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
 parser.add_argument('--patch_size', type=tuple, default=(96, 96, 96), help='patch_size of loading image')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
@@ -62,7 +62,7 @@ parser.add_argument('--mask_ratio', type=float, default=2 / 3, help='ratio of ma
 parser.add_argument('--u_alpha', type=float, default=2.0, help='unlabeled image ratio of mixuped image')
 parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight of unimage term')
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
-parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a2_pancreas/1/', help='snapshot path to save model')
+parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a3/', help='snapshot path to save model')
 args = parser.parse_args()
 torch.backends.cudnn.benchmark = True
 
@@ -509,6 +509,8 @@ def self_train(args, pre_snapshot_path, self_snapshot_path):
             writer.add_scalar('Self/proto_loss', proto_loss, iter_num)
             writer.add_scalar('Self/proto_fg_queries', proto_stats["proto_fg_queries"], iter_num)
             writer.add_scalar('Self/proto_bg_queries', proto_stats["proto_bg_queries"], iter_num)
+            writer.add_scalar('Self/proto_fg_count', proto_stats["proto_fg_count"], iter_num)
+            writer.add_scalar('Self/proto_bg_count', proto_stats["proto_bg_count"], iter_num)
             writer.add_scalar('Self/loss_all', loss, iter_num)
 
             optimizer.zero_grad()
