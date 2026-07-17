@@ -1,5 +1,4 @@
 import argparse
-import ast
 import os
 
 import torch
@@ -20,7 +19,7 @@ parser.add_argument('--labelnum', type=int, default=12, help='labeled training c
 parser.add_argument('--label_ratio', type=float, default=None,
                     help='optional labeled ratio in percent; overrides labelnum when provided')
 parser.add_argument('--max_samples', type=int, default=62, help='total Pancreas training cases used to compute label ratios')
-parser.add_argument('--patch_size', type=ast.literal_eval, default=(96, 96, 96), help='test patch size')
+parser.add_argument('--patch_size', type=int, nargs=3, default=(96, 96, 96), help='test patch size')
 parser.add_argument('--stride_xy', type=int, default=16, help='sliding-window stride for x/y')
 parser.add_argument('--stride_z', type=int, default=16, help='sliding-window stride for z')
 parser.add_argument('--eval_head', type=str, default='fg', choices=['fg', 'fused'], help='output head to evaluate')
@@ -40,6 +39,7 @@ parser.add_argument('--test_ema', type=int, default=1,
 parser.add_argument('--save_result', action='store_true', help='save prediction nii.gz files')
 parser.add_argument('--test_save_path', type=str, default=None, help='prediction output directory')
 args = parser.parse_args()
+args.patch_size = tuple(args.patch_size)
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 num_classes = 2

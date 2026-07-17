@@ -1,5 +1,4 @@
 import argparse
-import ast
 import os
 
 import torch
@@ -17,7 +16,7 @@ parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--detail', type=int, default=1, help='print metrics for every sample')
 parser.add_argument('--nms', type=int, default=1, help='apply NMS post-processing')
 parser.add_argument('--labelnum', type=int, default=8, help='labeled data')
-parser.add_argument('--patch_size', type=ast.literal_eval, default=(112, 112, 80), help='LA test patch size')
+parser.add_argument('--patch_size', type=int, nargs=3, default=(112, 112, 80), help='LA test patch size')
 parser.add_argument('--stride_xy', type=int, default=18, help='sliding-window stride for x/y')
 parser.add_argument('--stride_z', type=int, default=4, help='sliding-window stride for z')
 parser.add_argument('--stage_name', type=str, default='self_train', help='self_train or pre_train')
@@ -53,6 +52,7 @@ parser.add_argument(
     help='optional prediction output directory; defaults under snapshot_path',
 )
 args = parser.parse_args()
+args.patch_size = tuple(args.patch_size)
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 num_classes = 2

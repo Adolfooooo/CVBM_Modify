@@ -1,5 +1,4 @@
 import argparse
-import ast
 import os
 
 import torch
@@ -37,7 +36,7 @@ parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
 parser.add_argument('--detail', type=int, default=1, help='print metrics for every sample')
 parser.add_argument('--nms', type=int, default=1, help='apply NMS post-processing')
 parser.add_argument('--labelnum', type=int, default=25, help='labeled data')
-parser.add_argument('--patch_size', type=ast.literal_eval, default=(96, 96, 96), help='BRATS19 test patch size')
+parser.add_argument('--patch_size', type=int, nargs=3, default=(96, 96, 96), help='BRATS19 test patch size')
 parser.add_argument('--num_classes', type=int, default=2, help="number of dataset's classes")
 parser.add_argument('--stride_xy', type=int, default=16, help='sliding-window stride in x/y')
 parser.add_argument('--stride_z', type=int, default=16, help='sliding-window stride in z')
@@ -50,7 +49,7 @@ parser.add_argument(
     help='snapshot path used by ablation_05/brats19_train.py',
 )
 parser.add_argument('--proto_weight', type=float, default=0.1, help='weight for branch prototype loss')
-parser.add_argument('--proto_patch', type=ast.literal_eval, default=(8, 8, 8),
+parser.add_argument('--proto_patch', type=int, nargs=3, default=(8, 8, 8),
                     help='patch size for prototype pooling')
 parser.add_argument('--datafolder_name', type=str, default='data', help='directory under root_path containing h5 files')
 parser.add_argument(
@@ -89,15 +88,8 @@ def build_proto_dir():
     return 'proto_w{}_patch{}'.format(args.proto_weight, args.proto_patch)
 
 
-def build_checkpoint_dir():
-    if args.checkpoint_dir is not None:
-        return args.checkpoint_dir
-    checkpoint_dir = os.path.join(
-        args.snapshot_path,
-        '{}_{}_labeled'.format(args.exp, args.labelnum),
-        args.stage_name,
-    )
-    legacy_checkpoint_dir = os.path.join(
+def build_train_checkpoint_dir():
+    return os.path.join(
         args.snapshot_path,
         args.exp,
         'brats19',
@@ -105,12 +97,12 @@ def build_checkpoint_dir():
         build_proto_dir(),
         args.stage_name,
     )
-    default_checkpoint = os.path.join(checkpoint_dir, '{}_best_model.pth'.format(args.model))
-    legacy_checkpoint = os.path.join(legacy_checkpoint_dir, '{}_best_model.pth'.format(args.model))
-    if args.checkpoint is None and not os.path.exists(default_checkpoint) and os.path.exists(legacy_checkpoint):
-        print('fallback checkpoint path: {}'.format(legacy_checkpoint_dir))
-        return legacy_checkpoint_dir
-    return checkpoint_dir
+
+
+def build_checkpoint_dir():
+    if args.checkpoint_dir is not None:
+        return args.checkpoint_dir
+    return build_train_checkpoint_dir()
 
 
 def build_test_save_path():
@@ -118,8 +110,7 @@ def build_test_save_path():
         path = args.test_save_path
     else:
         path = os.path.join(
-            args.snapshot_path,
-            '{}_{}_labeled'.format(args.exp, args.labelnum),
+            build_checkpoint_dir(),
             '{}_predictions'.format(args.model),
         )
     return os.path.join(path, '')

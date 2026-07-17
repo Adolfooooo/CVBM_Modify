@@ -37,7 +37,7 @@ parser.add_argument('--self_max_iteration', type=int, default=15000, help='maxim
 parser.add_argument('--max_samples', type=int, default=62, help='maximum samples to train')
 parser.add_argument('--labeled_bs', type=int, default=4, help='batch_size of labeled data per gpu')
 parser.add_argument('--batch_size', type=int, default=8, help='batch_size per gpu')
-parser.add_argument('--patch_size', type=tuple, default=(96, 96, 96), help='patch_size of loading image')
+parser.add_argument('--patch_size', type=int, nargs=3, default=(96, 96, 96), help='patch_size of loading image')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
 parser.add_argument('--deterministic', type=int, default=0, help='whether use deterministic training')
 parser.add_argument('--labelnum', type=int, default=12, help='trained samples')
@@ -48,14 +48,14 @@ parser.add_argument('--consistency', type=float, default=1.0, help='consistency'
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency_rampup')
 parser.add_argument('--magnitude', type=float, default='10.0', help='magnitude')
 parser.add_argument('--topnum', type=int, default=32, help="negative sample contrast learning")
-parser.add_argument('--contrast_patch', type=tuple, default=(8,8,8))
+parser.add_argument('--contrast_patch', type=int, nargs=3, default=(8, 8, 8))
 parser.add_argument('--contrast_temperature', type=float, default=0.5, help='temperature for InfoNCE loss')
 parser.add_argument('--proto_weight', type=float, default=0.1, help='weight for branch prototype loss')
 parser.add_argument('--proto_dim', type=int, default=32, help='projection dimension for prototype loss')
 parser.add_argument('--proto_temperature', type=float, default=0.2, help='temperature for prototype contrast')
 parser.add_argument('--proto_conf_threshold', type=float, default=0.8, help='confidence threshold for prototype construction')
 parser.add_argument('--proto_query_threshold', type=float, default=0.0, help='confidence threshold for prototype queries')
-parser.add_argument('--proto_patch', type=tuple, default=(8, 8, 8), help='patch size for prototype pooling')
+parser.add_argument('--proto_patch', type=int, nargs=3, default=(8, 8, 8), help='patch size for prototype pooling')
 parser.add_argument('--proto_max_queries', type=int, default=4096, help='max patch queries per prototype branch')
 # -- setting of BANET
 parser.add_argument('--u_weight', type=float, default=0.5, help='weight of unlabeled pixels')
@@ -66,6 +66,9 @@ parser.add_argument('--loss_weight', type=float, default=0.5, help='loss weight 
 parser.add_argument('--beta', type=float, default=0.3, help='balance factor to control regional and sdm loss')
 parser.add_argument('--snapshot_path', type=str, default='./results/CVBM_15_1_t2_a/a1/ablation_05/1/', help='snapshot path to save model')
 args = parser.parse_args()
+args.patch_size = tuple(args.patch_size)
+args.contrast_patch = tuple(args.contrast_patch)
+args.proto_patch = tuple(args.proto_patch)
 torch.backends.cudnn.benchmark = True
 
 
