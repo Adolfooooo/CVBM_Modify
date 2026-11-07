@@ -20,6 +20,7 @@ class BranchBatchPrototypeLoss(nn.Module):
         query_threshold: float = 0.0,
         patch_size: Tuple[int, int, int] = (8, 8, 8),
         max_queries: int = 4096,
+        pooling: str = "patch_avg",
     ) -> None:
         super().__init__()
         if temperature <= 0:
@@ -30,6 +31,9 @@ class BranchBatchPrototypeLoss(nn.Module):
         self.query_threshold = query_threshold
         self.patch_size = patch_size
         self.max_queries = max_queries
+        if pooling not in ("patch_avg", "patch_max"):
+            raise ValueError(f"pooling must be patch_avg or patch_max, got {pooling}")
+        self.pooling = pooling
         self.fg_projector = nn.Conv3d(in_channels, proj_dim, kernel_size=1, bias=False)
         self.bg_projector = nn.Conv3d(in_channels, proj_dim, kernel_size=1, bias=False)
 
@@ -68,17 +72,13 @@ class BranchBatchPrototypeLoss(nn.Module):
         labels: torch.Tensor,
         confidence: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        pooled_features = F.avg_pool3d(features, kernel_size=self.patch_size, stride=self.patch_size)
-        pooled_labels = F.avg_pool3d(
-            labels.float().unsqueeze(1),
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-        ).squeeze(1)
-        pooled_confidence = F.avg_pool3d(
-            confidence.float().unsqueeze(1),
-            kernel_size=self.patch_size,
-            stride=self.patch_size,
-        ).squeeze(1)
+        if self.pooling == "patch_max":
+            pool = lambda x: F.max_pool3d(x, kernel_size=self.patch_size, stride=self.patch_size)
+        else:
+            pool = lambda x: F.avg_pool3d(x, kernel_size=self.patch_size, stride=self.patch_size)
+        pooled_features = pool(features)
+        pooled_labels = pool(labels.float().unsqueeze(1)).squeeze(1)
+        pooled_confidence = pool(confidence.float().unsqueeze(1)).squeeze(1)
         return pooled_features, (pooled_labels >= 0.5).long(), pooled_confidence
 
     def _branch_loss(
